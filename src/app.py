@@ -29,7 +29,8 @@ def do_work():
             while time.thread_time() - start_time < service_time:
                 # This loop actively consumes CPU cycles
                 pass
-            print(f"Completed busy-wait for {service_time} seconds.")
+            end_time = time.thread_time()
+            print(f"Completed busy-wait for {end_time - start_time:.4f} seconds (target: {service_time}s).")
     except (ValueError, TypeError):
         print(f"Invalid SERVICE_TIME_SECONDS value: {service_time_str}. Skipping work simulation.")
 
@@ -65,12 +66,15 @@ def make_call(target):
     service_name = target['service']
     # Kubernetes DNS resolves the service name to its internal IP address
     url = f"http://{service_name}"
+    start_time = time.monotonic()
     try:
-        response = requests.get(url, timeout=5)
-        print(f"Called {url}, status: {response.status_code}")
+        response = requests.get(url, timeout=180)
+        duration = time.monotonic() - start_time
+        print(f"Called {url}, status: {response.status_code}, duration: {duration:.4f}s")
         return {"service": service_name, "status": response.status_code}
     except requests.exceptions.RequestException as e:
-        print(f"Failed to call {url}: {e}")
+        duration = time.monotonic() - start_time
+        print(f"Failed to call {url} after {duration:.4f}s: {e}")
         return {"service": service_name, "status": "error", "reason": str(e)}
 
 @app.route('/')
@@ -110,4 +114,3 @@ def handle_request():
         results.append(make_call(chosen_target))
 
     return jsonify({"message": f"Response from {my_name}", "outbound_results": results})
-

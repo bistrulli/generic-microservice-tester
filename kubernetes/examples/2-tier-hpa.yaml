@@ -1,0 +1,43 @@
+# ===================================================================
+#  Horizontal Pod Autoscaler (HPA) Configuration
+# ===================================================================
+# This file defines two HPAs, one for each microservice in the
+# 2-tier application. They will scale independently based on CPU usage.
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: entry-hpa # A unique name for the entry service's HPA
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: entry-deployment # <-- Points to the entry deployment
+  minReplicas: 1
+  maxReplicas: 10 # The maximum number of pods to scale up to
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 50 # Target 50% CPU utilization
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: backend-hpa # A unique name for the backend service's HPA
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: backend-deployment # <-- Points to the backend deployment
+  minReplicas: 1
+  maxReplicas: 10 # The maximum number of pods to scale up to
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 50 # Target 50% CPU utilization
