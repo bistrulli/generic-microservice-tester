@@ -1,36 +1,54 @@
 import os
 import random
 import requests
+from requests.adapters import HTTPAdapter
 import threading
 import time
 from flask import Flask, jsonify
 
 app = Flask(__name__)
 
+# --- Best Practice: Create a single, shared Session object ---
+# This object manages a connection pool and reuses TCP connections (HTTP Keep-Alive).
+# We increase the pool size to handle high concurrency scenarios.
+SESSION = requests.Session()
+adapter = HTTPAdapter(pool_connections=100, pool_maxsize=100)
+SESSION.mount('http://', adapter)
+SESSION.mount('https://', adapter)
+
+
 # --- Configuration Section ---
 # The behavior of this microservice is controlled by environment variables.
 #
 # SERVICE_NAME: A friendly name for this instance (e.g., "frontend", "backend-a").
 #
-# SERVICE_TIME_SECONDS: Simulates CPU work by busy-waiting for a specified duration.
-#                       Example: "0.1" for 100ms of CPU load.
+# SERVICE_TIME_SECONDS: Simulates a precise amount of CPU time consumption using a busy-wait.
+#                       Example: "0.1" for 100ms of CPU time.
 #
 # OUTBOUND_CALLS: Defines downstream HTTP calls.
 #                 Format: "TYPE:service_name:probability,TYPE:service_name:probability,..."
 #                 Example: "SYNC:backend-a:0.6,SYNC:backend-b:0.4,ASYNC:logger-svc:1.0"
 
 def do_work():
-    """Simulates CPU-intensive work using a busy-wait loop."""
+    """Simulates a CPU-intensive task by busy-waiting until the current thread
+    has consumed a specific amount of CPU time.
+    """
     try:
         service_time_str = os.environ.get('SERVICE_TIME_SECONDS', '0')
         service_time = float(service_time_str)
         if service_time > 0:
-            start_time = time.thread_time()
-            while time.thread_time() - start_time < service_time:
-                # This loop actively consumes CPU cycles
+            # Get the initial CPU time of the current thread.
+            start_cpu_time = time.thread_time()
+            # Loop until the elapsed CPU time for this thread exceeds the target.
+            while (time.thread_time() - start_cpu_time) < service_time:
+                # This 'pass' statement creates the busy-wait, actively consuming CPU.
                 pass
-            end_time = time.thread_time()
-            print(f"Completed busy-wait for {end_time - start_time:.4f} seconds (target: {service_time}s).")
+            
+            # Optional: Log the actual CPU time consumed for verification.
+            end_cpu_time = time.thread_time()
+            consumed_cpu = end_cpu_time - start_cpu_time
+            print(f"Completed busy-wait. Target CPU time: {service_time}s, Consumed CPU time: {consumed_cpu:.4f}s")
+            
     except (ValueError, TypeError):
         print(f"Invalid SERVICE_TIME_SECONDS value: {service_time_str}. Skipping work simulation.")
 
@@ -62,19 +80,17 @@ def parse_outbound_calls():
     return probabilistic_targets, fixed_targets
 
 def make_call(target):
-    """Executes a single HTTP GET request to a downstream service."""
+    """Executes a single HTTP GET request using the shared Session object."""
     service_name = target['service']
     # Kubernetes DNS resolves the service name to its internal IP address
     url = f"http://{service_name}"
-    start_time = time.monotonic()
     try:
-        response = requests.get(url, timeout=180)
-        duration = time.monotonic() - start_time
-        print(f"Called {url}, status: {response.status_code}, duration: {duration:.4f}s")
+        # Use the shared SESSION object to make the request
+        response = SESSION.get(url, timeout=5)
+        print(f"Called {url}, status: {response.status_code}")
         return {"service": service_name, "status": response.status_code}
     except requests.exceptions.RequestException as e:
-        duration = time.monotonic() - start_time
-        print(f"Failed to call {url} after {duration:.4f}s: {e}")
+        print(f"Failed to call {url}: {e}")
         return {"service": service_name, "status": "error", "reason": str(e)}
 
 @app.route('/')
@@ -99,18 +115,13 @@ def handle_request():
             thread.start()
             results.append({"service": target['service'], "status": "async_sent"})
 
-    # 4. Choose and execute one of the probabilistic calls based on their weights
+    # 4. Choose and execute one of the probabilistic calls
     if probabilistic_targets:
         services = [t['service'] for t in probabilistic_targets]
         weights = [t['probability'] for t in probabilistic_targets]
-
-        # Randomly choose one service based on the defined probabilities
         chosen_service_name = random.choices(services, weights=weights, k=1)[0]
-
-        # Find the full definition for the chosen target
         chosen_target = next(t for t in probabilistic_targets if t['service'] == chosen_service_name)
-
-        # Execute the call (must be synchronous to make the choice meaningful)
         results.append(make_call(chosen_target))
 
     return jsonify({"message": f"Response from {my_name}", "outbound_results": results})
+
