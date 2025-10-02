@@ -82,9 +82,9 @@ spec:
         - name: OUTBOUND_CALLS
           value: "" # This service calls no other services
         - name: GUNICORN_WORKERS
-          value: "2"
+          value: "1"
         - name: GUNICORN_THREADS
-          value: "4"
+          value: "1"
 
 ---
 # --- BACKEND SERVICE ---
