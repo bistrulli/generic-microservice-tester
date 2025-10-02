@@ -97,7 +97,7 @@ def make_call(target):
     url = f"http://{service_name}"
     try:
         # Use the shared SESSION object to make the request
-        response = SESSION.get(url, timeout=5)
+        response = SESSION.get(url, timeout=180)
         print(f"Called {url}, status: {response.status_code}")
         return {"service": service_name, "status": response.status_code}
     except requests.exceptions.RequestException as e:
