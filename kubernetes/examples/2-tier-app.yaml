@@ -20,7 +20,7 @@ spec:
       containers:
       - name: app
         image: bistrulli/generic-microservice-tester:0.1
-        pullPolicy: Always
+        imagePullPolicy: Always
         ports:
         - containerPort: 8080
         env:
@@ -70,7 +70,7 @@ spec:
       containers:
       - name: app
         image: bistrulli/generic-microservice-tester:0.1
-        pullPolicy: Always
+        imagePullPolicy: Always
         ports:
         - containerPort: 8080
         env:
