@@ -30,27 +30,38 @@ SESSION.mount('https://', adapter)
 #                 Example: "SYNC:backend-a:0.6,SYNC:backend-b:0.4,ASYNC:logger-svc:1.0"
 
 def do_work():
-    """Simulates a CPU-intensive task by busy-waiting until the current thread
-    has consumed a specific amount of CPU time.
+    """Simulates a CPU-intensive task using psutil for container-aware timing.
+    Uses psutil to measure actual CPU time consumed by the process, which is
+    container-aware and accounts for CPU throttling in Kubernetes environments.
     """
     try:
+        import psutil
         service_time_str = os.environ.get('SERVICE_TIME_SECONDS', '0')
         service_time = float(service_time_str)
+
         if service_time > 0:
-            # Get the initial CPU time of the current thread.
-            start_cpu_time = time.thread_time()
-            # Loop until the elapsed CPU time for this thread exceeds the target.
-            while (time.thread_time() - start_cpu_time) < service_time:
-                # This 'pass' statement creates the busy-wait, actively consuming CPU.
-                pass
-            
-            # Optional: Log the actual CPU time consumed for verification.
-            end_cpu_time = time.thread_time()
-            consumed_cpu = end_cpu_time - start_cpu_time
-            print(f"Completed busy-wait. Target CPU time: {service_time}s, Consumed CPU time: {consumed_cpu:.4f}s")
-            
-    except (ValueError, TypeError):
-        print(f"Invalid SERVICE_TIME_SECONDS value: {service_time_str}. Skipping work simulation.")
+            # Get current process and initial CPU times
+            process = psutil.Process()
+            start_cpu_times = process.cpu_times()
+            start_cpu = start_cpu_times.user + start_cpu_times.system
+
+            # Busy-wait until we've consumed the target CPU time
+            while True:
+                current_cpu_times = process.cpu_times()
+                current_cpu = current_cpu_times.user + current_cpu_times.system
+                consumed_cpu = current_cpu - start_cpu
+
+                if consumed_cpu >= service_time:
+                    break
+
+            print(f"Completed psutil busy-wait. Target CPU time: {service_time}s, Consumed CPU time: {consumed_cpu:.4f}s")
+
+    except ImportError as e:
+        raise RuntimeError("psutil library not available - required for container-aware CPU timing") from e
+    except (ValueError, TypeError) as e:
+        raise RuntimeError(f"Invalid SERVICE_TIME_SECONDS value: {service_time_str}") from e
+    except Exception as e:
+        raise RuntimeError(f"psutil CPU timing failed: {e}") from e
 
 
 def parse_outbound_calls():
