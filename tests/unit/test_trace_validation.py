@@ -201,7 +201,7 @@ class TestValidateOrForkBothBranches:
         ]
         valid, reason = validate_trace(trace, OR_FORK_CONFIG, "visit")
         assert not valid
-        assert "non-chosen" in reason.lower()
+        assert "multiple" in reason.lower() or "non-chosen" in reason.lower()
 
 
 class TestValidateReplyLast:
@@ -245,7 +245,7 @@ class TestValidateSequenceOrder:
         ]
         valid, reason = validate_trace(trace, SEQUENCE_CONFIG, "e1")
         assert not valid
-        assert "sequence" in reason.lower()
+        assert "sequence" in reason.lower() or "start" in reason.lower()
 
 
 class TestValidatePhaseEntry:
@@ -304,6 +304,64 @@ class TestValidatePhaseEntry:
         valid, reason = validate_trace(trace, PHASE_CONFIG, "notify")
         assert not valid
         assert "reply" in reason.lower()
+
+
+class TestValidateStartActivity:
+    def test_wrong_start_activity_invalid(self):
+        """First activity must be start_activity from config."""
+        trace = [
+            {"type": "activity", "name": "b", "service_time_mean": 0.02},
+            {"type": "activity", "name": "a", "service_time_mean": 0.01},
+            {"type": "reply", "activity": "b", "entry": "e1"},
+        ]
+        valid, reason = validate_trace(trace, SEQUENCE_CONFIG, "e1")
+        assert not valid
+        assert "first" in reason.lower() or "start" in reason.lower()
+
+
+class TestValidateCompleteness:
+    def test_skipped_activity_invalid(self):
+        """Skipping a required activity must be detected."""
+        trace = [
+            {"type": "activity", "name": "a", "service_time_mean": 0.01},
+            # 'b' is required by sequence a->b but is missing
+            {"type": "reply", "activity": "b", "entry": "e1"},
+        ]
+        valid, reason = validate_trace(trace, SEQUENCE_CONFIG, "e1")
+        assert not valid
+        assert (
+            "completeness" in reason.lower()
+            or "missing" in reason.lower()
+            or "b" in reason.lower()
+        )
+
+
+class TestValidateOrForkModelDriven:
+    def test_or_fork_without_event_both_branches_invalid(self):
+        """Even without or_fork event, having both branches is invalid."""
+        trace = [
+            {"type": "activity", "name": "cache"},
+            # No or_fork event! But both branches executed
+            {"type": "activity", "name": "internal"},
+            {"type": "activity", "name": "external"},
+            {"type": "reply", "activity": "internal", "entry": "visit"},
+        ]
+        valid, reason = validate_trace(trace, OR_FORK_CONFIG, "visit")
+        assert not valid
+        assert "multiple" in reason.lower() or "or-fork" in reason.lower()
+
+
+class TestValidateMultipleReplies:
+    def test_multiple_replies_invalid(self):
+        trace = [
+            {"type": "activity", "name": "a", "service_time_mean": 0.01},
+            {"type": "reply", "activity": "a", "entry": "e1"},
+            {"type": "activity", "name": "b", "service_time_mean": 0.02},
+            {"type": "reply", "activity": "b", "entry": "e1"},
+        ]
+        valid, reason = validate_trace(trace, SEQUENCE_CONFIG, "e1")
+        assert not valid
+        assert "multiple" in reason.lower() or "reply" in reason.lower()
 
 
 class TestValidateEmptyTrace:
