@@ -498,7 +498,7 @@ def execute_activity_graph(
 
     while current:
         # Cycle detection
-        if current in visited and current not in and_forks and current not in or_forks:
+        if current in visited:
             raise RuntimeError(
                 f"Cycle detected in activity graph: '{current}' visited twice"
             )

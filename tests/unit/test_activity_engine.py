@@ -385,3 +385,23 @@ class TestCycleDetection:
         }
         with pytest.raises(RuntimeError, match="[Cc]ycle"):
             gmt_app.execute_activity_graph("e", config, dry_run=True)
+
+    def test_cycle_through_fork_point_raises_error(self):
+        """Cycle through an AND-fork source must also be detected."""
+        config = {
+            "entries": {"e": {"start_activity": "a"}},
+            "activities": {
+                "a": {"service_time": 0.0},
+                "b": {"service_time": 0.0},
+                "c": {"service_time": 0.0},
+            },
+            "graph": {
+                "sequences": [],
+                "or_forks": [],
+                "and_forks": [{"from": "a", "branches": ["b", "c"]}],
+                "and_joins": [{"branches": ["b", "c"], "to": "a"}],  # joins back to a!
+                "replies": {},
+            },
+        }
+        with pytest.raises(RuntimeError, match="[Cc]ycle|max iterations"):
+            gmt_app.execute_activity_graph("e", config, dry_run=True)
