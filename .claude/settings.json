@@ -1,0 +1,60 @@
+{
+  "permissions": {
+    "allow": [
+      "Edit(*)",
+      "Write(*)",
+      "Read(*)",
+      "Bash(docker *)",
+      "Bash(kubectl *)",
+      "Bash(python *)",
+      "Bash(python3 *)",
+      "Bash(pip *)",
+      "Bash(pip3 *)",
+      "Bash(pytest *)",
+      "Bash(ruff *)",
+      "Bash(ls *)",
+      "Bash(mkdir *)",
+      "Bash(pwd)",
+      "Bash(wc *)",
+      "Bash(file *)",
+      "Bash(chmod *)",
+      "Bash(bash *)",
+      "Bash(which *)",
+      "Bash(echo *)",
+      "Bash(sleep *)",
+      "Bash(head *)",
+      "Bash(cat *)",
+      "Bash(tail *)",
+      "Bash(git *)"
+    ],
+    "deny": [
+      "Bash(rm -rf *)",
+      "Bash(pip install* --break-system-packages*)",
+      "Bash(pip3 install* --break-system-packages*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "file=\"$CLAUDE_FILE_PATH\"; if [ -n \"$file\" ] && echo \"$file\" | grep -q '\\.py$'; then ruff format \"$file\" 2>/dev/null; ruff check --fix \"$file\" 2>/dev/null; fi"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if echo \"$CLAUDE_TOOL_INPUT\" | grep -qiE '(password|secret|token|credential|api.key)\\s*='; then echo 'BLOCKED: command appears to contain credentials' >&2; exit 2; fi"
+          }
+        ]
+      }
+    ]
+  }
+}
