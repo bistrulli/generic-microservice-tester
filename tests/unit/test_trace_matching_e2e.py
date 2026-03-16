@@ -21,6 +21,9 @@ from lqn_compiler import build_task_config
 from lqn_parser import parse_lqn_file
 from trace_validator import validate_and_fork_parallelism, validate_trace
 
+os_module = __import__("os")
+os_module.environ.setdefault("SERVICE_NAME", "test-service")
+
 GROUNDTRUTH = (
     Path(__file__).parent.parent.parent
     / "test"
@@ -92,7 +95,7 @@ class TestTraceMatchingVisit:
             choices[or_fork["chosen"]] += 1
 
         ratio = choices["internal"] / 200
-        assert 0.85 < ratio < 1.0, (
+        assert 0.89 < ratio < 0.99, (
             f"Internal ratio {ratio:.2f} not close to 0.95. Counts: {choices}"
         )
 
@@ -358,3 +361,104 @@ class TestAndForkParallelism:
                 assert "timestamp_end" in event, (
                     f"Activity '{event['name']}' missing timestamp_end"
                 )
+
+
+# --- Step 2: Independent LQN model anchors (break circular reasoning) ---
+
+
+class TestLqnModelFidelity:
+    """Verify compiled config matches LQN source directly.
+
+    These tests hardcode values from the .lqn file to break the
+    circular dependency between compiler, engine, and validator.
+    """
+
+    @pytest.fixture()
+    def model(self, groundtruth_dir=None):
+        if not GROUNDTRUTH.exists():
+            pytest.skip("Ground truth not found")
+        return parse_lqn_file(str(GROUNDTRUTH))
+
+    def test_tserver_visit_start_activity(self, model):
+        tserver = next(t for t in model.tasks if t.name == "TServer")
+        visit = next(e for e in tserver.entries if e.name == "visit")
+        assert visit.start_activity == "cache"
+
+    def test_tserver_buy_start_activity(self, model):
+        tserver = next(t for t in model.tasks if t.name == "TServer")
+        buy = next(e for e in tserver.entries if e.name == "buy")
+        assert buy.start_activity == "prepare"
+
+    def test_activity_service_times_from_lqn(self, model):
+        """Verify service times match LQN source exactly."""
+        tserver = next(t for t in model.tasks if t.name == "TServer")
+        expected = {
+            "prepare": 0.01,
+            "pack": 0.03,
+            "ship": 0.01,
+            "display": 0.001,
+            "cache": 0.001,
+            "internal": 0.001,
+            "external": 0.003,
+        }
+        for name, expected_st in expected.items():
+            assert name in tserver.activities, f"Activity '{name}' not in parser output"
+            assert tserver.activities[name].service_time == pytest.approx(
+                expected_st
+            ), (
+                f"Activity '{name}': parsed={tserver.activities[name].service_time}, "
+                f"expected={expected_st} from LQN source"
+            )
+
+    def test_external_has_sync_call_to_read(self, model):
+        tserver = next(t for t in model.tasks if t.name == "TServer")
+        ext = tserver.activities["external"]
+        assert len(ext.sync_calls) == 1
+        assert ext.sync_calls[0] == ("read", 1.0)
+
+    def test_or_fork_probabilities_from_lqn(self, model):
+        tserver = next(t for t in model.tasks if t.name == "TServer")
+        graph = tserver.activity_graph
+        assert len(graph.or_forks) == 1
+        source, branches = graph.or_forks[0]
+        assert source == "cache"
+        probs = {name: prob for prob, name in branches}
+        assert probs["internal"] == pytest.approx(0.95)
+        assert probs["external"] == pytest.approx(0.05)
+
+    def test_and_fork_branches_from_lqn(self, model):
+        tserver = next(t for t in model.tasks if t.name == "TServer")
+        graph = tserver.activity_graph
+        assert len(graph.and_forks) == 1
+        source, branches = graph.and_forks[0]
+        assert source == "prepare"
+        assert set(branches) == {"pack", "ship"}
+
+    def test_notify_service_time_from_lqn(self, model):
+        tserver = next(t for t in model.tasks if t.name == "TServer")
+        notify = next(e for e in tserver.entries if e.name == "notify")
+        assert notify.phase_service_times == [0.08]
+
+    def test_save_service_time_and_call_from_lqn(self, model):
+        tserver = next(t for t in model.tasks if t.name == "TServer")
+        save = next(e for e in tserver.entries if e.name == "save")
+        assert save.phase_service_times == [0.02]
+        assert "write" in save.phase_sync_calls
+        assert save.phase_sync_calls["write"] == [1.0]
+
+    def test_compiler_preserves_lqn_values(self, model, tserver_config):
+        """Verify compiler output matches parser output for key values."""
+        config = tserver_config
+        # Activity service times
+        assert config["activities"]["pack"]["service_time"] == pytest.approx(0.03)
+        assert config["activities"]["cache"]["service_time"] == pytest.approx(0.001)
+        # OR-fork probabilities
+        or_fork = config["graph"]["or_forks"][0]
+        probs = {b["to"]: b["prob"] for b in or_fork["branches"]}
+        assert probs["internal"] == pytest.approx(0.95)
+        # AND-fork structure
+        and_fork = config["graph"]["and_forks"][0]
+        assert set(and_fork["branches"]) == {"pack", "ship"}
+        # Replies
+        assert config["graph"]["replies"]["display"] == "buy"
+        assert config["graph"]["replies"]["internal"] == "visit"

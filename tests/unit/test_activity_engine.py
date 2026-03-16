@@ -144,7 +144,7 @@ class TestExecuteMeanCalls:
             total_calls += mock_call.call_count
 
         avg = total_calls / n_trials
-        assert 1.05 < avg < 1.35, f"Average calls {avg} not close to 1.2"
+        assert 1.13 < avg < 1.27, f"Average calls {avg} not close to 1.2"
 
     @patch.object(gmt_app, "make_async_call_pooled")
     def test_async_calls(self, mock_async):
@@ -248,7 +248,7 @@ class TestExecuteOrFork:
             counts[chosen] += 1
 
         ratio = counts["common"] / 500
-        assert 0.85 < ratio < 1.0, f"Common ratio {ratio} not close to 0.95"
+        assert 0.90 < ratio < 0.99, f"Common ratio {ratio} not close to 0.95"
 
 
 class TestExecuteActivityGraph:
@@ -367,3 +367,21 @@ class TestHandleRequestEntryRouting:
             assert resp.status_code == 200
             data = resp.get_json()
             assert data["entry"] == "hello"
+
+
+class TestCycleDetection:
+    def test_cycle_raises_error(self):
+        """Graph with cycle must raise RuntimeError, not hang."""
+        config = {
+            "entries": {"e": {"start_activity": "a"}},
+            "activities": {"a": {"service_time": 0.0}, "b": {"service_time": 0.0}},
+            "graph": {
+                "sequences": [["a", "b"], ["b", "a"]],
+                "or_forks": [],
+                "and_forks": [],
+                "and_joins": [],
+                "replies": {},
+            },
+        }
+        with pytest.raises(RuntimeError, match="[Cc]ycle"):
+            gmt_app.execute_activity_graph("e", config, dry_run=True)

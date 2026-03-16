@@ -6,7 +6,6 @@ that dry-run mode skips CPU work and HTTP calls.
 """
 
 import os
-import random
 import sys
 import time
 from pathlib import Path
@@ -130,17 +129,20 @@ class TestTraceActivityRecorded:
             "e1", SIMPLE_ACTIVITY_CONFIG, trace, dry_run=True
         )
         activity_events = [e for e in trace if e["type"] == "activity"]
-        assert len(activity_events) >= 1
+        assert len(activity_events) == 1
         assert activity_events[0]["name"] == "work"
 
-    def test_activity_has_service_time_fields(self):
+    def test_activity_has_correct_service_time_values(self):
         trace = []
         gmt_app.execute_activity_graph(
             "e1", SIMPLE_ACTIVITY_CONFIG, trace, dry_run=True
         )
         act = next(e for e in trace if e["type"] == "activity")
-        assert "service_time_mean" in act
-        assert "service_time_sampled" in act
+        assert act["service_time_mean"] == 0.001
+        assert isinstance(act["service_time_sampled"], float)
+        assert act["service_time_sampled"] > 0
+        assert "timestamp_start" in act
+        assert "timestamp_end" in act
 
 
 class TestTraceAndForkRecorded:
@@ -220,14 +222,14 @@ class TestTraceCallsRecorded:
         trace = []
         gmt_app.execute_activity_graph("save", CALL_CONFIG, trace, dry_run=True)
         sync_events = [e for e in trace if e["type"] == "sync_call"]
-        assert len(sync_events) >= 1
+        assert len(sync_events) == 1
         assert sync_events[0]["target"] == "backend-svc/write"
 
     def test_async_call_in_trace(self):
         trace = []
         gmt_app.execute_activity_graph("save", CALL_CONFIG, trace, dry_run=True)
         async_events = [e for e in trace if e["type"] == "async_call"]
-        assert len(async_events) >= 1
+        assert len(async_events) == 1
         assert async_events[0]["target"] == "logger-svc/log"
 
 
@@ -267,19 +269,23 @@ class TestDryRunNoHttp:
 
 
 class TestDryRunDeterministic:
-    def test_two_runs_same_structure(self):
-        """Two dry-runs produce traces with same event types and activity names."""
-        random.seed(42)
-        trace1 = []
-        gmt_app.execute_activity_graph("buy", AND_FORK_CONFIG, trace1, dry_run=True)
+    def test_and_fork_trace_has_correct_structure(self):
+        """AND-fork dry-run produces deterministic trace with all expected events."""
+        trace = []
+        gmt_app.execute_activity_graph("buy", AND_FORK_CONFIG, trace, dry_run=True)
 
-        random.seed(42)
-        trace2 = []
-        gmt_app.execute_activity_graph("buy", AND_FORK_CONFIG, trace2, dry_run=True)
+        event_types = [e["type"] for e in trace]
+        # Expected: activity(prepare), and_fork, activity(pack), activity(ship), and_join, activity(display), reply
+        assert event_types.count("activity") == 4  # prepare, pack, ship, display
+        assert event_types.count("and_fork") == 1
+        assert event_types.count("and_join") == 1
+        assert event_types.count("reply") == 1
+        assert event_types[-1] == "reply"
 
-        types1 = [(e["type"], e.get("name", e.get("from", ""))) for e in trace1]
-        types2 = [(e["type"], e.get("name", e.get("from", ""))) for e in trace2]
-        assert types1 == types2
+        activity_names = [e["name"] for e in trace if e["type"] == "activity"]
+        assert activity_names[0] == "prepare"  # start activity
+        assert set(activity_names[1:3]) == {"pack", "ship"}  # fork branches
+        assert activity_names[3] == "display"  # after join
 
 
 # --- Regression: existing functionality not broken ---
@@ -287,16 +293,17 @@ class TestDryRunDeterministic:
 
 class TestNoTraceBackwardCompat:
     def test_execute_activity_no_trace(self):
-        """Calling without trace/dry_run still works (backward compat)."""
+        """Calling without trace/dry_run returns empty list for no-call activity."""
         config = {"activities": {"w": {"service_time": 0.0}}}
         results = gmt_app.execute_activity("w", config)
-        assert isinstance(results, list)
+        assert results == []
 
     def test_execute_activity_graph_no_trace(self):
+        """Phase entry with service_time=0 returns empty results."""
         config = {
             "entries": {"e": {"service_time": 0.0}},
             "activities": {},
             "graph": {},
         }
         results = gmt_app.execute_activity_graph("e", config)
-        assert isinstance(results, list)
+        assert results == []

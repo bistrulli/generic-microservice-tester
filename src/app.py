@@ -393,9 +393,15 @@ def execute_and_fork(
 
     if dry_run:
         # Sequential execution in dry-run — deterministic, no threading
+        # Tag events with "branch" for parity with real parallel execution
         results = []
         for branch_name in branches:
-            results.extend(execute_activity(branch_name, config, trace, dry_run))
+            branch_trace = [] if trace is not None else None
+            results.extend(execute_activity(branch_name, config, branch_trace, dry_run))
+            if trace is not None and branch_trace is not None:
+                for event in branch_trace:
+                    event["branch"] = branch_name
+                    trace.append(event)
         return results
 
     # Real execution: parallel threads with per-branch sub-traces
@@ -484,10 +490,27 @@ def execute_activity_graph(
         sequences[a] = b
     replies = graph.get("replies", {})
 
+    activities = config.get("activities", {})
     results = []
     current = start_activity
+    visited = set()
+    max_iterations = 100
 
     while current:
+        # Cycle detection
+        if current in visited and current not in and_forks and current not in or_forks:
+            raise RuntimeError(
+                f"Cycle detected in activity graph: '{current}' visited twice"
+            )
+        visited.add(current)
+        max_iterations -= 1
+        if max_iterations <= 0:
+            raise RuntimeError("Activity graph exceeded max iterations (100)")
+
+        # Validate activity name exists
+        if current not in activities:
+            print(f"[LQN] WARNING: activity '{current}' not in activities config")
+
         # Check if this activity is a reply point for our entry
         if current in replies and replies[current] == entry_name:
             results.extend(execute_activity(current, config, trace, dry_run))
