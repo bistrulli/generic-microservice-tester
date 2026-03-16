@@ -1,11 +1,16 @@
+import ctypes
+import json
+import math
 import os
+import pathlib
 import random
-import requests
-from requests.adapters import HTTPAdapter
 import time
-from concurrent.futures import ThreadPoolExecutor
-from flask import Flask, jsonify
+from concurrent.futures import ThreadPoolExecutor, wait as futures_wait
+
 import numpy as np
+import requests
+from flask import Flask, jsonify
+from requests.adapters import HTTPAdapter
 
 app = Flask(__name__)
 
@@ -14,25 +19,27 @@ app = Flask(__name__)
 
 # Main session for synchronous calls (per worker)
 SESSION = requests.Session()
-adapter = HTTPAdapter(pool_connections=100, pool_maxsize=100)  # Large pool for sync calls
-SESSION.mount('http://', adapter)
-SESSION.mount('https://', adapter)
+adapter = HTTPAdapter(
+    pool_connections=100, pool_maxsize=100
+)  # Large pool for sync calls
+SESSION.mount("http://", adapter)
+SESSION.mount("https://", adapter)
 
 # Dedicated session for asynchronous calls (completely isolated)
 ASYNC_SESSION = requests.Session()
 async_adapter = HTTPAdapter(
-    pool_connections=100,   # Large pool for async calls
+    pool_connections=100,  # Large pool for async calls
     pool_maxsize=100,
-    max_retries=0          # No retries for pure async semantics
+    max_retries=0,  # No retries for pure async semantics
 )
-ASYNC_SESSION.mount('http://', async_adapter)
-ASYNC_SESSION.mount('https://', async_adapter)
+ASYNC_SESSION.mount("http://", async_adapter)
+ASYNC_SESSION.mount("https://", async_adapter)
 
 # Worker-isolated thread pool for async calls
 # Increased capacity for better throughput while maintaining worker isolation
 ASYNC_EXECUTOR = ThreadPoolExecutor(
     max_workers=10,  # More threads per worker for higher async throughput
-    thread_name_prefix=f"async-worker-{os.getpid()}"
+    thread_name_prefix=f"async-worker-{os.getpid()}",
 )
 
 
@@ -52,6 +59,7 @@ ASYNC_EXECUTOR = ThreadPoolExecutor(
 # Global state for tracking CPU time between requests within the same worker process
 _last_user_time = 0.0
 
+
 def do_work():
     """Simulates CPU-intensive work using precise per-request user CPU time tracking.
 
@@ -69,7 +77,8 @@ def do_work():
 
     try:
         import psutil
-        service_time_str = os.environ.get('SERVICE_TIME_SECONDS', '0')
+
+        service_time_str = os.environ.get("SERVICE_TIME_SECONDS", "0")
         mean_service_time = float(service_time_str)
 
         if mean_service_time <= 0:
@@ -84,7 +93,9 @@ def do_work():
 
         # Worker process restart detection
         if current_user < _last_user_time:
-            print(f"Worker restart detected: current={current_user:.4f}s, last={_last_user_time:.4f}s")
+            print(
+                f"Worker restart detected: current={current_user:.4f}s, last={_last_user_time:.4f}s"
+            )
             _last_user_time = 0.0
 
         # Calculate inherited CPU time from previous requests in this worker
@@ -93,7 +104,9 @@ def do_work():
         # How much additional work do we need to do for this request?
         remaining = service_time - inherited_user
 
-        print(f"CPU timing: mean={mean_service_time:.4f}s, sampled={service_time:.4f}s, inherited={inherited_user:.4f}s, remaining={remaining:.4f}s")
+        print(
+            f"CPU timing: mean={mean_service_time:.4f}s, sampled={service_time:.4f}s, inherited={inherited_user:.4f}s, remaining={remaining:.4f}s"
+        )
 
         if remaining > 0:
             # Standard busy-wait for remaining CPU time
@@ -104,48 +117,57 @@ def do_work():
             print(f"Completed busy-wait for {remaining:.4f}s")
         else:
             # Skip strategy: request completed without additional work
-            print(f"Request completed without additional work (excess: {abs(remaining):.4f}s)")
+            print(
+                f"Request completed without additional work (excess: {abs(remaining):.4f}s)"
+            )
 
         # Update tracking for next request
         _last_user_time = process.cpu_times().user
 
     except ImportError as e:
-        raise RuntimeError("psutil library not available - required for container-aware CPU timing") from e
+        raise RuntimeError(
+            "psutil library not available - required for container-aware CPU timing"
+        ) from e
     except (ValueError, TypeError) as e:
-        raise RuntimeError(f"Invalid SERVICE_TIME_SECONDS value: {service_time_str}") from e
+        raise RuntimeError(
+            f"Invalid SERVICE_TIME_SECONDS value: {service_time_str}"
+        ) from e
     except Exception as e:
         raise RuntimeError(f"Process-based CPU timing failed: {e}") from e
 
 
 def parse_outbound_calls():
     """Reads and parses the OUTBOUND_CALLS environment variable."""
-    config_str = os.environ.get('OUTBOUND_CALLS', '')
+    config_str = os.environ.get("OUTBOUND_CALLS", "")
     if not config_str:
         return [], []
 
     targets = []
-    call_defs = config_str.split(',')
+    call_defs = config_str.split(",")
     for call_def in call_defs:
         try:
-            call_type, service_name, prob_str = call_def.strip().split(':')
+            call_type, service_name, prob_str = call_def.strip().split(":")
             probability = float(prob_str)
-            targets.append({
-                "type": call_type.upper(),
-                "service": service_name,
-                "probability": probability
-            })
+            targets.append(
+                {
+                    "type": call_type.upper(),
+                    "service": service_name,
+                    "probability": probability,
+                }
+            )
         except ValueError:
             print(f"Skipping malformed call definition: {call_def}")
 
     # Separate probabilistic calls from fixed calls (which are always executed)
-    probabilistic_targets = [t for t in targets if t['probability'] < 1.0]
-    fixed_targets = [t for t in targets if t['probability'] >= 1.0]
+    probabilistic_targets = [t for t in targets if t["probability"] < 1.0]
+    fixed_targets = [t for t in targets if t["probability"] >= 1.0]
 
     return probabilistic_targets, fixed_targets
 
+
 def make_call(target):
     """Executes a single HTTP GET request using the shared Session object."""
-    service_name = target['service']
+    service_name = target["service"]
     # Kubernetes DNS resolves the service name to its internal IP address
     url = f"http://{service_name}"
     try:
@@ -174,7 +196,7 @@ def make_async_call_pooled(target):
     Returns:
         None: Fire-and-forget, no blocking or waiting
     """
-    service_name = target['service']
+    service_name = target["service"]
     url = f"http://{service_name}"
 
     def _async_worker():
@@ -190,7 +212,7 @@ def make_async_call_pooled(target):
 
     try:
         # Submit to worker-isolated thread pool - non-blocking
-        future = ASYNC_EXECUTOR.submit(_async_worker)
+        ASYNC_EXECUTOR.submit(_async_worker)
         print(f"Async call submitted to worker-{os.getpid()} pool: {url}")
 
         # Optional: We could store futures for monitoring, but for LQN semantics we ignore them
@@ -200,10 +222,309 @@ def make_async_call_pooled(target):
         print(f"Failed to submit async call to pool: {url} -> {e}")
 
 
-@app.route('/')
-def handle_request():
-    """Main endpoint to handle incoming requests."""
-    my_name = os.environ.get('SERVICE_NAME', 'generic-service')
+# --- LQN Activity Engine ---
+# When LQN_TASK_CONFIG is set, the microservice interprets an LQN task fragment
+# with activity diagrams, AND-fork/join, OR-fork, and reply semantics.
+
+# Load C extension for GIL-releasing busy-wait (for AND-fork parallelism)
+_BUSY_WAIT_LIB = None
+
+
+def _get_busy_wait_lib():
+    """Lazily load the busy_wait shared library."""
+    global _BUSY_WAIT_LIB
+    if _BUSY_WAIT_LIB is not None:
+        return _BUSY_WAIT_LIB
+
+    # Look in current dir (Docker /app/) and src/ (local dev)
+    for candidate in [
+        pathlib.Path("busy_wait.so"),
+        pathlib.Path(__file__).parent / "busy_wait.so",
+    ]:
+        if candidate.exists():
+            _BUSY_WAIT_LIB = ctypes.CDLL(str(candidate))
+            _BUSY_WAIT_LIB.busy_wait_cpu.argtypes = [ctypes.c_double]
+            _BUSY_WAIT_LIB.busy_wait_cpu.restype = None
+            return _BUSY_WAIT_LIB
+    return None
+
+
+# Worker-isolated thread pool for AND-fork parallel execution
+FORK_EXECUTOR = ThreadPoolExecutor(
+    max_workers=8,
+    thread_name_prefix=f"fork-worker-{os.getpid()}",
+)
+
+# Cached LQN task config (parsed once per worker at first request)
+_LQN_TASK_CONFIG = None
+_LQN_CONFIG_LOADED = False
+
+
+def load_task_config() -> dict | None:
+    """Load and cache LQN_TASK_CONFIG from env var. Returns None if not set."""
+    global _LQN_TASK_CONFIG, _LQN_CONFIG_LOADED
+    if _LQN_CONFIG_LOADED:
+        return _LQN_TASK_CONFIG
+    _LQN_CONFIG_LOADED = True
+
+    config_str = os.environ.get("LQN_TASK_CONFIG", "")
+    if not config_str:
+        return None
+
+    try:
+        _LQN_TASK_CONFIG = json.loads(config_str)
+        print(f"[LQN] Loaded task config: {_LQN_TASK_CONFIG.get('task_name', '?')}")
+        return _LQN_TASK_CONFIG
+    except json.JSONDecodeError as e:
+        print(f"[LQN] ERROR: Invalid LQN_TASK_CONFIG JSON: {e}")
+        return None
+
+
+def do_busy_wait(service_time_mean: float) -> float:
+    """Execute CPU busy-wait for a sampled service time.
+
+    Uses the C extension (GIL-releasing) if available, otherwise falls back
+    to the Python busy-wait loop.
+
+    Returns the actual sampled service time.
+    """
+    if service_time_mean <= 0:
+        return 0.0
+
+    sampled = np.random.exponential(service_time_mean)
+    lib = _get_busy_wait_lib()
+
+    if lib is not None:
+        lib.busy_wait_cpu(sampled)
+    else:
+        # Fallback: Python busy-wait (holds GIL — no parallelism)
+        start = time.process_time()
+        while (time.process_time() - start) < sampled:
+            pass
+
+    return sampled
+
+
+def execute_mean_calls(url: str, mean_calls: float, call_type: str) -> list[dict]:
+    """Execute N HTTP calls where N is derived from mean_calls.
+
+    For integer part: always execute that many calls.
+    For fractional part: probabilistic extra call.
+    E.g., mean_calls=1.2 → 1 call + 20% chance of 2nd call.
+    E.g., mean_calls=3.0 → exactly 3 calls.
+    """
+    n_calls = math.floor(mean_calls)
+    fractional = mean_calls - n_calls
+    if fractional > 0 and random.random() < fractional:
+        n_calls += 1
+
+    results = []
+    for _ in range(n_calls):
+        if call_type == "SYNC":
+            results.append(make_call({"service": url}))
+        elif call_type == "ASYNC":
+            make_async_call_pooled({"service": url})
+            results.append({"service": url, "status": "async_pooled"})
+    return results
+
+
+def execute_activity(activity_name: str, config: dict) -> list[dict]:
+    """Execute a single LQN activity: service time + outbound calls."""
+    activities = config.get("activities", {})
+    act_def = activities.get(activity_name, {})
+
+    results = []
+
+    # 1. CPU busy-wait for service time
+    st = act_def.get("service_time", 0.0)
+    if st > 0:
+        actual = do_busy_wait(st)
+        print(f"[LQN] Activity {activity_name}: service_time={actual:.4f}s")
+
+    # 2. Synchronous calls
+    for target_url, mean_calls in (act_def.get("sync_calls") or {}).items():
+        results.extend(execute_mean_calls(target_url, mean_calls, "SYNC"))
+
+    # 3. Asynchronous calls
+    for target_url, mean_calls in (act_def.get("async_calls") or {}).items():
+        results.extend(execute_mean_calls(target_url, mean_calls, "ASYNC"))
+
+    return results
+
+
+def execute_and_fork(branches: list[str], config: dict) -> list[dict]:
+    """Execute AND-fork branches in parallel using ThreadPoolExecutor + C extension.
+
+    Each branch runs in a separate thread. The C busy-wait releases the GIL,
+    enabling true CPU parallelism. Wall-clock time ≈ max(branch times).
+    """
+    futures = []
+    for branch_name in branches:
+        future = FORK_EXECUTOR.submit(execute_activity, branch_name, config)
+        futures.append(future)
+
+    # AND-join: wait for all branches to complete
+    futures_wait(futures)
+
+    results = []
+    for f in futures:
+        branch_results = f.result()
+        results.extend(branch_results)
+    return results
+
+
+def execute_or_fork(
+    source: str, branches: list[dict], config: dict
+) -> tuple[str, list[dict]]:
+    """Execute OR-fork: choose one branch probabilistically.
+
+    Returns (chosen_activity_name, results).
+    """
+    names = [b["to"] for b in branches]
+    weights = [b["prob"] for b in branches]
+    chosen = random.choices(names, weights=weights, k=1)[0]
+    results = execute_activity(chosen, config)
+    return chosen, results
+
+
+def execute_activity_graph(entry_name: str, config: dict) -> list[dict]:
+    """Execute the activity graph for an entry, handling fork/join/choice/reply.
+
+    Walks the graph from the entry's start_activity, following sequences,
+    AND-forks, OR-forks, and stopping at reply points.
+    """
+    entries = config.get("entries", {})
+    entry_def = entries.get(entry_name, {})
+    graph = config.get("graph", {})
+
+    start_activity = entry_def.get("start_activity")
+    if not start_activity:
+        # Phase-based entry: just do service time + calls
+        return execute_phase_entry(entry_name, entry_def)
+
+    # Build lookup structures for efficient graph traversal
+    and_forks = {f["from"]: f["branches"] for f in graph.get("and_forks", [])}
+    and_joins = {
+        tuple(sorted(j["branches"])): j["to"] for j in graph.get("and_joins", [])
+    }
+    or_forks = {f["from"]: f["branches"] for f in graph.get("or_forks", [])}
+    sequences = {}
+    for a, b in graph.get("sequences", []):
+        sequences[a] = b
+    replies = graph.get("replies", {})
+
+    results = []
+    current = start_activity
+    visited_joins = set()
+
+    while current:
+        # Check if this activity is a reply point for our entry
+        if current in replies and replies[current] == entry_name:
+            # Execute this activity then stop (reply)
+            results.extend(execute_activity(current, config))
+            break
+
+        # Check for AND-fork
+        if current in and_forks:
+            # Execute the current activity first
+            results.extend(execute_activity(current, config))
+            branches = and_forks[current]
+            # Execute branches in parallel
+            results.extend(execute_and_fork(branches, config))
+            # Find the join point
+            join_key = tuple(sorted(branches))
+            if join_key in and_joins:
+                current = and_joins[join_key]
+                visited_joins.add(join_key)
+            else:
+                break
+            continue
+
+        # Check for OR-fork
+        if current in or_forks:
+            results.extend(execute_activity(current, config))
+            chosen, branch_results = execute_or_fork(current, or_forks[current], config)
+            results.extend(branch_results)
+            # Check if chosen activity is a reply point
+            if chosen in replies and replies[chosen] == entry_name:
+                break
+            # Follow sequence from chosen if any
+            current = sequences.get(chosen)
+            continue
+
+        # Regular activity: execute and follow sequence
+        results.extend(execute_activity(current, config))
+
+        # Follow sequence
+        if current in sequences:
+            current = sequences[current]
+        else:
+            break
+
+    return results
+
+
+def execute_phase_entry(entry_name: str, entry_def: dict) -> list[dict]:
+    """Execute a phase-based entry (no activity diagram)."""
+    results = []
+
+    # Service time (Phase 1 only for now)
+    st = entry_def.get("service_time", 0.0)
+    if st > 0:
+        actual = do_busy_wait(st)
+        print(f"[LQN] Phase entry {entry_name}: service_time={actual:.4f}s")
+
+    # Sync calls
+    for target_url, mean_calls in (entry_def.get("sync_calls") or {}).items():
+        results.extend(execute_mean_calls(target_url, mean_calls, "SYNC"))
+
+    # Async calls
+    for target_url, mean_calls in (entry_def.get("async_calls") or {}).items():
+        results.extend(execute_mean_calls(target_url, mean_calls, "ASYNC"))
+
+    return results
+
+
+# --- Route Handlers ---
+
+
+@app.route("/")
+@app.route("/<entry_name>")
+def handle_request(entry_name=None):
+    """Main endpoint. Dispatches to LQN engine or legacy handler."""
+    config = load_task_config()
+
+    if config:
+        return handle_lqn_request(entry_name, config)
+    return handle_legacy_request()
+
+
+def handle_lqn_request(entry_name: str | None, config: dict):
+    """Handle request using LQN task configuration."""
+    my_name = os.environ.get("SERVICE_NAME", "generic-service")
+    entries = config.get("entries", {})
+
+    if not entry_name:
+        # Default to first entry
+        entry_name = next(iter(entries)) if entries else None
+
+    if not entry_name or entry_name not in entries:
+        return jsonify({"error": f"Unknown entry: {entry_name}"}), 404
+
+    results = execute_activity_graph(entry_name, config)
+
+    return jsonify(
+        {
+            "message": f"Response from {my_name}",
+            "entry": entry_name,
+            "outbound_results": results,
+        }
+    )
+
+
+def handle_legacy_request():
+    """Legacy handler using SERVICE_TIME_SECONDS + OUTBOUND_CALLS env vars."""
+    my_name = os.environ.get("SERVICE_NAME", "generic-service")
 
     # 1. Simulate the service's own workload first
     do_work()
@@ -214,27 +535,27 @@ def handle_request():
 
     # 3. Execute all fixed calls (probability >= 1.0)
     for target in fixed_targets:
-        if target['type'] == 'SYNC':
+        if target["type"] == "SYNC":
             results.append(make_call(target))
-        elif target['type'] == 'ASYNC':
-            # Submit to worker-isolated thread pool (LQN-semantic compliant)
+        elif target["type"] == "ASYNC":
             make_async_call_pooled(target)
-            results.append({"service": target['service'], "status": "async_pooled"})
+            results.append({"service": target["service"], "status": "async_pooled"})
 
     # 4. Choose and execute one of the probabilistic calls
     if probabilistic_targets:
-        services = [t['service'] for t in probabilistic_targets]
-        weights = [t['probability'] for t in probabilistic_targets]
+        services = [t["service"] for t in probabilistic_targets]
+        weights = [t["probability"] for t in probabilistic_targets]
         chosen_service_name = random.choices(services, weights=weights, k=1)[0]
-        chosen_target = next(t for t in probabilistic_targets if t['service'] == chosen_service_name)
+        chosen_target = next(
+            t for t in probabilistic_targets if t["service"] == chosen_service_name
+        )
 
-        # Handle both SYNC and ASYNC types correctly for probabilistic calls
-        if chosen_target['type'] == 'SYNC':
+        if chosen_target["type"] == "SYNC":
             results.append(make_call(chosen_target))
-        elif chosen_target['type'] == 'ASYNC':
-            # Submit to worker-isolated thread pool (LQN-semantic compliant)
+        elif chosen_target["type"] == "ASYNC":
             make_async_call_pooled(chosen_target)
-            results.append({"service": chosen_target['service'], "status": "async_pooled"})
+            results.append(
+                {"service": chosen_target["service"], "status": "async_pooled"}
+            )
 
     return jsonify({"message": f"Response from {my_name}", "outbound_results": results})
-
