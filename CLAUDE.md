@@ -44,7 +44,9 @@ generic-microservice-tester/
 │   ├── busy_wait.c         # C extension per busy-wait GIL-releasing (AND-fork)
 │   └── requirements.txt     # Dipendenze Python
 ├── tools/
-│   ├── lqn_compiler.py     # Compilatore LQN → manifesti K8s
+│   ├── lqn_compiler.py     # Compilatore LQN → manifesti K8s (OTEL-compliant)
+│   ├── locustfile_gen.py   # Genera locustfile Locust dal reference task LQN
+│   ├── deploy_gen.py       # Genera deploy.sh (up/down/test) con Locust Job K8s
 │   ├── lqsim_runner.py     # Wrapper lqsim: esegue simulazioni e parsa output .p
 │   └── lqn_model_utils.py  # Utility per modelli LQN parametrici (es. cambio multiplicity)
 ├── docker/
@@ -71,6 +73,7 @@ generic-microservice-tester/
 │   ├── settings.local.json  # Override locali
 │   ├── commands/            # Slash commands
 │   └── skills/              # Knowledge base per lo sviluppo
+├── pyproject.toml           # Package Python (pip install -e . per CLI globali)
 ├── CLAUDE.md                # Questo file
 └── README.md                # Documentazione pubblica
 ```
@@ -82,7 +85,9 @@ generic-microservice-tester/
 | Componente | File | Descrizione |
 |---|---|---|
 | **LQN Parser** | `src/lqn_parser.py` | Parser completo del formato LQN V5 testuale. Produce dataclass `LqnModel` con processori, task, entry, activity e activity graph. |
-| **LQN Compiler** | `tools/lqn_compiler.py` | Compila file `.lqn` in manifesti K8s (Deployment + Service per task non-reference). Risolve target chiamate in nomi DNS K8s. |
+| **LQN Compiler** | `tools/lqn_compiler.py` | Compila file `.lqn` in manifesti K8s OTEL-compliant (Deployment + Service per task non-reference, OTEL annotations/env vars, NodePort su entry-point, resource limits). |
+| **Locustfile Generator** | `tools/locustfile_gen.py` | Genera locustfile Locust dal reference task LQN. Riproduce fedelmente il grafo activity: service time → `time.sleep()`, sync/async call → `self.client.get("/<entry>")` con URL relativi. |
+| **Deploy Generator** | `tools/deploy_gen.py` | Genera script `deploy.sh` + `locustfile.py` per deploy K8s completo (up/down/test). Include Instrumentation CR OTEL e Locust Job in-cluster. |
 | **Activity Engine** | `src/app.py` → `execute_activity_graph()` | Interprete di activity diagram LQN: sequenze, AND-fork/join (parallelo), OR-fork (probabilistico), reply semantics. Usa `LQN_TASK_CONFIG` JSON. |
 | **C extension busy-wait** | `src/busy_wait.c` | Busy-wait CPU che rilascia il GIL tramite ctypes. Usa `CLOCK_THREAD_CPUTIME_ID` per timing per-thread. Abilita vero parallelismo nei branch AND-fork. |
 | **Execution tracing** | `src/app.py` → trace params | Ogni funzione del motore produce eventi strutturati (activity, and_fork, and_join, or_fork, reply, sync_call, async_call). Attivabile con `LQN_TRACE=1`. |
@@ -179,6 +184,12 @@ python tools/lqn_compiler.py test/lqn-groundtruth/template_annotated.lqn
 # Deploy da modello LQN
 python tools/lqn_compiler.py model.lqn | kubectl apply -f -
 
+# Generare locustfile dal reference task
+lqn-locustfile model.lqn -o locustfile.py
+
+# Generare deploy.sh + locustfile completo
+lqn-deploy model.lqn --image bistrulli/generic-microservice-tester:latest -o deploy.sh
+
 # Eseguire test suite
 pytest tests/unit/ -v --tb=short
 
@@ -186,8 +197,12 @@ pytest tests/unit/ -v --tb=short
 ruff check src/ tools/ tests/
 ruff format --check src/
 
-# Installare dipendenze
+# Installare dipendenze runtime (Docker)
 pip install -r src/requirements.txt
+
+# Installare CLI tools globalmente
+pip install -e .
+# oppure: pipx install -e .
 ```
 
 ---
@@ -256,5 +271,7 @@ TYPE:SERVICE_NAME:PROBABILITY[,TYPE:SERVICE_NAME:PROBABILITY,...]
 - Ogni worker Gunicorn ha stato isolato (`_last_user_time`, `SESSION`, `ASYNC_SESSION`, `ASYNC_EXECUTOR`, `FORK_EXECUTOR`)
 - Il delta tracking gestisce automaticamente il restart dei worker
 - **Compilatore LQN**: `tools/lqn_compiler.py` traduce file `.lqn` in manifesti K8s con `LQN_TASK_CONFIG` serializzato
-- **Test suite**: 171 unit test (parser, compiler, engine, trace, validazione) + E2E Docker (utilization law, lqsim predictions, closed-loop 50% utilization) + E2E K8s (topology). Verifica formale via trace matching
+- **Test suite**: 227 unit test (parser, compiler, engine, trace, validazione, locustfile gen, deploy gen) + E2E Docker (utilization law, lqsim predictions, closed-loop 50% utilization) + E2E K8s (topology). Verifica formale via trace matching
+- **CLI tools**: `lqn-compile`, `lqsim-run`, `lqn-locustfile`, `lqn-deploy` — installabili globalmente con `pip install -e .` o `pipx`
+- **OTEL compliance**: i manifest generati includono annotation auto-instrumentation, env vars OTEL, NodePort su entry-point, Instrumentation CR nel deploy script
 - I manifest K8s in `kubernetes/examples/` sono pronti all'uso e autocontenuti (deployment + service)
