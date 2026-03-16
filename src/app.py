@@ -181,20 +181,9 @@ def make_call(target):
 
 
 def make_async_call_pooled(target):
-    """
-    Executes asynchronous HTTP calls using worker-isolated thread pool.
+    """Executes asynchronous HTTP calls using worker-isolated thread pool.
 
-    This function implements LQN-semantic compliant "send-no-reply" behavior by:
-    1. Using a dedicated thread pool isolated per Gunicorn worker
-    2. Using a separate HTTP session for async calls (no resource contention)
-    3. Limiting concurrent async threads to prevent worker saturation
-    4. Ensuring true fire-and-forget semantics as per LQN 'z' calls
-
-    Args:
-        target (dict): Target configuration with 'service' field
-
-    Returns:
-        None: Fire-and-forget, no blocking or waiting
+    Implements LQN-semantic compliant "send-no-reply" behavior.
     """
     service_name = target["service"]
     url = f"http://{service_name}"
@@ -202,7 +191,6 @@ def make_async_call_pooled(target):
     def _async_worker():
         """Worker function executed in isolated thread"""
         try:
-            # Use dedicated async session (isolated from main session)
             response = ASYNC_SESSION.get(url, timeout=300)
             print(f"[ASYNC-POOL-{os.getpid()}] {url} -> {response.status_code}")
         except requests.exceptions.RequestException as e:
@@ -211,14 +199,9 @@ def make_async_call_pooled(target):
             print(f"[ASYNC-POOL-{os.getpid()}] {url} -> UNEXPECTED: {e}")
 
     try:
-        # Submit to worker-isolated thread pool - non-blocking
         ASYNC_EXECUTOR.submit(_async_worker)
         print(f"Async call submitted to worker-{os.getpid()} pool: {url}")
-
-        # Optional: We could store futures for monitoring, but for LQN semantics we ignore them
-
     except Exception as e:
-        # Log the submission failure, but don't affect main process
         print(f"Failed to submit async call to pool: {url} -> {e}")
 
 
@@ -260,6 +243,11 @@ _LQN_TASK_CONFIG = None
 _LQN_CONFIG_LOADED = False
 
 
+def _is_dry_run() -> bool:
+    """Check if dry-run mode is active (no CPU work, no HTTP calls)."""
+    return os.environ.get("LQN_DRY_RUN", "0") == "1"
+
+
 def load_task_config() -> dict | None:
     """Load and cache LQN_TASK_CONFIG from env var. Returns None if not set."""
     global _LQN_TASK_CONFIG, _LQN_CONFIG_LOADED
@@ -280,11 +268,11 @@ def load_task_config() -> dict | None:
         return None
 
 
-def do_busy_wait(service_time_mean: float) -> float:
+def do_busy_wait(service_time_mean: float, dry_run: bool = False) -> float:
     """Execute CPU busy-wait for a sampled service time.
 
     Uses the C extension (GIL-releasing) if available, otherwise falls back
-    to the Python busy-wait loop.
+    to the Python busy-wait loop. In dry-run mode, skips actual CPU work.
 
     Returns the actual sampled service time.
     """
@@ -292,12 +280,14 @@ def do_busy_wait(service_time_mean: float) -> float:
         return 0.0
 
     sampled = np.random.exponential(service_time_mean)
-    lib = _get_busy_wait_lib()
 
+    if dry_run:
+        return sampled
+
+    lib = _get_busy_wait_lib()
     if lib is not None:
         lib.busy_wait_cpu(sampled)
     else:
-        # Fallback: Python busy-wait (holds GIL — no parallelism)
         start = time.process_time()
         while (time.process_time() - start) < sampled:
             pass
@@ -305,13 +295,17 @@ def do_busy_wait(service_time_mean: float) -> float:
     return sampled
 
 
-def execute_mean_calls(url: str, mean_calls: float, call_type: str) -> list[dict]:
+def execute_mean_calls(
+    url: str,
+    mean_calls: float,
+    call_type: str,
+    trace: list[dict] | None = None,
+    dry_run: bool = False,
+) -> list[dict]:
     """Execute N HTTP calls where N is derived from mean_calls.
 
     For integer part: always execute that many calls.
     For fractional part: probabilistic extra call.
-    E.g., mean_calls=1.2 → 1 call + 20% chance of 2nd call.
-    E.g., mean_calls=3.0 → exactly 3 calls.
     """
     n_calls = math.floor(mean_calls)
     fractional = mean_calls - n_calls
@@ -321,60 +315,117 @@ def execute_mean_calls(url: str, mean_calls: float, call_type: str) -> list[dict
     results = []
     for _ in range(n_calls):
         if call_type == "SYNC":
-            results.append(make_call({"service": url}))
+            if trace is not None:
+                trace.append({"type": "sync_call", "target": url})
+            if dry_run:
+                results.append({"service": url, "status": "dry_run"})
+            else:
+                results.append(make_call({"service": url}))
         elif call_type == "ASYNC":
-            make_async_call_pooled({"service": url})
+            if trace is not None:
+                trace.append({"type": "async_call", "target": url})
+            if not dry_run:
+                make_async_call_pooled({"service": url})
             results.append({"service": url, "status": "async_pooled"})
     return results
 
 
-def execute_activity(activity_name: str, config: dict) -> list[dict]:
+def execute_activity(
+    activity_name: str,
+    config: dict,
+    trace: list[dict] | None = None,
+    dry_run: bool = False,
+) -> list[dict]:
     """Execute a single LQN activity: service time + outbound calls."""
     activities = config.get("activities", {})
     act_def = activities.get(activity_name, {})
-
     results = []
 
-    # 1. CPU busy-wait for service time
     st = act_def.get("service_time", 0.0)
-    if st > 0:
-        actual = do_busy_wait(st)
-        print(f"[LQN] Activity {activity_name}: service_time={actual:.4f}s")
+    sampled = do_busy_wait(st, dry_run=dry_run) if st > 0 else 0.0
 
-    # 2. Synchronous calls
+    if trace is not None:
+        trace.append(
+            {
+                "type": "activity",
+                "name": activity_name,
+                "service_time_mean": st,
+                "service_time_sampled": sampled,
+            }
+        )
+
+    if st > 0 and not dry_run:
+        print(f"[LQN] Activity {activity_name}: service_time={sampled:.4f}s")
+
     for target_url, mean_calls in (act_def.get("sync_calls") or {}).items():
-        results.extend(execute_mean_calls(target_url, mean_calls, "SYNC"))
+        results.extend(
+            execute_mean_calls(target_url, mean_calls, "SYNC", trace, dry_run)
+        )
 
-    # 3. Asynchronous calls
     for target_url, mean_calls in (act_def.get("async_calls") or {}).items():
-        results.extend(execute_mean_calls(target_url, mean_calls, "ASYNC"))
+        results.extend(
+            execute_mean_calls(target_url, mean_calls, "ASYNC", trace, dry_run)
+        )
 
     return results
 
 
-def execute_and_fork(branches: list[str], config: dict) -> list[dict]:
+def execute_and_fork(
+    branches: list[str],
+    config: dict,
+    trace: list[dict] | None = None,
+    dry_run: bool = False,
+) -> list[dict]:
     """Execute AND-fork branches in parallel using ThreadPoolExecutor + C extension.
 
     Each branch runs in a separate thread. The C busy-wait releases the GIL,
-    enabling true CPU parallelism. Wall-clock time ≈ max(branch times).
+    enabling true CPU parallelism. Wall-clock time ~= max(branch times).
+
+    Thread safety: each branch gets its own sub-trace, merged with branch tags
+    at the join point.
     """
+    if trace is not None:
+        trace.append({"type": "and_fork", "branches": list(branches)})
+
+    if dry_run:
+        # Sequential execution in dry-run — deterministic, no threading
+        results = []
+        for branch_name in branches:
+            results.extend(
+                execute_activity(branch_name, config, trace, dry_run)
+            )
+        return results
+
+    # Real execution: parallel threads with per-branch sub-traces
+    branch_traces: list[list[dict]] = [[] for _ in branches]
     futures = []
-    for branch_name in branches:
-        future = FORK_EXECUTOR.submit(execute_activity, branch_name, config)
+    for i, branch_name in enumerate(branches):
+        future = FORK_EXECUTOR.submit(
+            execute_activity, branch_name, config, branch_traces[i], dry_run
+        )
         futures.append(future)
 
-    # AND-join: wait for all branches to complete
     futures_wait(futures)
+
+    # Merge branch traces into main trace with branch tags
+    if trace is not None:
+        for i, bt in enumerate(branch_traces):
+            for event in bt:
+                event["branch"] = branches[i]
+                trace.append(event)
 
     results = []
     for f in futures:
-        branch_results = f.result()
-        results.extend(branch_results)
+        results.extend(f.result())
     return results
 
 
 def execute_or_fork(
-    source: str, branches: list[dict], config: dict
+    source: str,
+    branches: list[dict],
+    config: dict,
+    trace: list[dict] | None = None,
+    dry_run: bool = False,
 ) -> tuple[str, list[dict]]:
     """Execute OR-fork: choose one branch probabilistically.
 
@@ -383,15 +434,34 @@ def execute_or_fork(
     names = [b["to"] for b in branches]
     weights = [b["prob"] for b in branches]
     chosen = random.choices(names, weights=weights, k=1)[0]
-    results = execute_activity(chosen, config)
+
+    if trace is not None:
+        trace.append(
+            {
+                "type": "or_fork",
+                "from": source,
+                "chosen": chosen,
+                "branches": names,
+            }
+        )
+
+    results = execute_activity(chosen, config, trace, dry_run)
     return chosen, results
 
 
-def execute_activity_graph(entry_name: str, config: dict) -> list[dict]:
+def execute_activity_graph(
+    entry_name: str,
+    config: dict,
+    trace: list[dict] | None = None,
+    dry_run: bool = False,
+) -> list[dict]:
     """Execute the activity graph for an entry, handling fork/join/choice/reply.
 
     Walks the graph from the entry's start_activity, following sequences,
     AND-forks, OR-forks, and stopping at reply points.
+
+    If trace is not None, appends structured events for each step.
+    If dry_run, skips CPU work and HTTP calls.
     """
     entries = config.get("entries", {})
     entry_def = entries.get(entry_name, {})
@@ -399,8 +469,7 @@ def execute_activity_graph(entry_name: str, config: dict) -> list[dict]:
 
     start_activity = entry_def.get("start_activity")
     if not start_activity:
-        # Phase-based entry: just do service time + calls
-        return execute_phase_entry(entry_name, entry_def)
+        return execute_phase_entry(entry_name, entry_def, trace, dry_run)
 
     # Build lookup structures for efficient graph traversal
     and_forks = {f["from"]: f["branches"] for f in graph.get("and_forks", [])}
@@ -415,47 +484,58 @@ def execute_activity_graph(entry_name: str, config: dict) -> list[dict]:
 
     results = []
     current = start_activity
-    visited_joins = set()
 
     while current:
         # Check if this activity is a reply point for our entry
         if current in replies and replies[current] == entry_name:
-            # Execute this activity then stop (reply)
-            results.extend(execute_activity(current, config))
+            results.extend(execute_activity(current, config, trace, dry_run))
+            if trace is not None:
+                trace.append(
+                    {"type": "reply", "activity": current, "entry": entry_name}
+                )
             break
 
         # Check for AND-fork
         if current in and_forks:
-            # Execute the current activity first
-            results.extend(execute_activity(current, config))
-            branches = and_forks[current]
-            # Execute branches in parallel
-            results.extend(execute_and_fork(branches, config))
-            # Find the join point
-            join_key = tuple(sorted(branches))
+            results.extend(execute_activity(current, config, trace, dry_run))
+            fork_branches = and_forks[current]
+            results.extend(
+                execute_and_fork(fork_branches, config, trace, dry_run)
+            )
+            join_key = tuple(sorted(fork_branches))
             if join_key in and_joins:
+                if trace is not None:
+                    trace.append(
+                        {
+                            "type": "and_join",
+                            "branches": list(fork_branches),
+                            "to": and_joins[join_key],
+                        }
+                    )
                 current = and_joins[join_key]
-                visited_joins.add(join_key)
             else:
                 break
             continue
 
         # Check for OR-fork
         if current in or_forks:
-            results.extend(execute_activity(current, config))
-            chosen, branch_results = execute_or_fork(current, or_forks[current], config)
+            results.extend(execute_activity(current, config, trace, dry_run))
+            chosen, branch_results = execute_or_fork(
+                current, or_forks[current], config, trace, dry_run
+            )
             results.extend(branch_results)
-            # Check if chosen activity is a reply point
             if chosen in replies and replies[chosen] == entry_name:
+                if trace is not None:
+                    trace.append(
+                        {"type": "reply", "activity": chosen, "entry": entry_name}
+                    )
                 break
-            # Follow sequence from chosen if any
             current = sequences.get(chosen)
             continue
 
         # Regular activity: execute and follow sequence
-        results.extend(execute_activity(current, config))
+        results.extend(execute_activity(current, config, trace, dry_run))
 
-        # Follow sequence
         if current in sequences:
             current = sequences[current]
         else:
@@ -464,23 +544,40 @@ def execute_activity_graph(entry_name: str, config: dict) -> list[dict]:
     return results
 
 
-def execute_phase_entry(entry_name: str, entry_def: dict) -> list[dict]:
+def execute_phase_entry(
+    entry_name: str,
+    entry_def: dict,
+    trace: list[dict] | None = None,
+    dry_run: bool = False,
+) -> list[dict]:
     """Execute a phase-based entry (no activity diagram)."""
     results = []
 
-    # Service time (Phase 1 only for now)
     st = entry_def.get("service_time", 0.0)
-    if st > 0:
-        actual = do_busy_wait(st)
-        print(f"[LQN] Phase entry {entry_name}: service_time={actual:.4f}s")
+    sampled = do_busy_wait(st, dry_run=dry_run) if st > 0 else 0.0
 
-    # Sync calls
+    if trace is not None:
+        trace.append(
+            {
+                "type": "phase_entry",
+                "name": entry_name,
+                "service_time_mean": st,
+                "service_time_sampled": sampled,
+            }
+        )
+
+    if st > 0 and not dry_run:
+        print(f"[LQN] Phase entry {entry_name}: service_time={sampled:.4f}s")
+
     for target_url, mean_calls in (entry_def.get("sync_calls") or {}).items():
-        results.extend(execute_mean_calls(target_url, mean_calls, "SYNC"))
+        results.extend(
+            execute_mean_calls(target_url, mean_calls, "SYNC", trace, dry_run)
+        )
 
-    # Async calls
     for target_url, mean_calls in (entry_def.get("async_calls") or {}).items():
-        results.extend(execute_mean_calls(target_url, mean_calls, "ASYNC"))
+        results.extend(
+            execute_mean_calls(target_url, mean_calls, "ASYNC", trace, dry_run)
+        )
 
     return results
 
@@ -503,23 +600,26 @@ def handle_lqn_request(entry_name: str | None, config: dict):
     """Handle request using LQN task configuration."""
     my_name = os.environ.get("SERVICE_NAME", "generic-service")
     entries = config.get("entries", {})
+    dry_run = _is_dry_run()
+    trace_enabled = dry_run or os.environ.get("LQN_TRACE", "0") == "1"
+    trace = [] if trace_enabled else None
 
     if not entry_name:
-        # Default to first entry
         entry_name = next(iter(entries)) if entries else None
 
     if not entry_name or entry_name not in entries:
         return jsonify({"error": f"Unknown entry: {entry_name}"}), 404
 
-    results = execute_activity_graph(entry_name, config)
+    results = execute_activity_graph(entry_name, config, trace, dry_run)
 
-    return jsonify(
-        {
-            "message": f"Response from {my_name}",
-            "entry": entry_name,
-            "outbound_results": results,
-        }
-    )
+    response = {
+        "message": f"Response from {my_name}",
+        "entry": entry_name,
+        "outbound_results": results,
+    }
+    if trace is not None:
+        response["trace"] = trace
+    return jsonify(response)
 
 
 def handle_legacy_request():
