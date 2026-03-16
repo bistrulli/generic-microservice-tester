@@ -154,14 +154,15 @@ class TestExecuteMeanCalls:
 
 
 class TestExecuteActivity:
-    def test_activity_with_service_time(self):
+    @patch.object(gmt_app.np.random, "exponential", return_value=0.05)
+    def test_activity_with_service_time(self, mock_exp):
         config = {
-            "activities": {"work": {"service_time": 0.01}},
+            "activities": {"work": {"service_time": 0.05}},
         }
         start = time.monotonic()
         results = gmt_app.execute_activity("work", config)
         elapsed = time.monotonic() - start
-        assert elapsed >= 0.005
+        assert elapsed >= 0.03
         assert isinstance(results, list)
 
     @patch.object(gmt_app, "make_call")
@@ -251,17 +252,18 @@ class TestExecuteOrFork:
 
 
 class TestExecuteActivityGraph:
-    def test_phase_entry(self):
+    @patch.object(gmt_app.np.random, "exponential", return_value=0.05)
+    def test_phase_entry(self, mock_exp):
         """Phase-based entry (no activity diagram) executes service time."""
         config = {
-            "entries": {"notify": {"service_time": 0.01}},
+            "entries": {"notify": {"service_time": 0.05}},
             "activities": {},
             "graph": {},
         }
         start = time.monotonic()
         gmt_app.execute_activity_graph("notify", config)
         elapsed = time.monotonic() - start
-        assert elapsed >= 0.005
+        assert elapsed >= 0.03
 
     def test_or_fork_graph(self):
         """Activity graph with OR-fork follows one branch."""
