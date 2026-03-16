@@ -140,7 +140,9 @@ class TestTraceActivityRecorded:
         act = next(e for e in trace if e["type"] == "activity")
         assert act["service_time_mean"] == 0.001
         assert isinstance(act["service_time_sampled"], float)
-        assert act["service_time_sampled"] > 0
+        assert act["service_time_sampled"] > 0, (
+            "service_time_sampled must be > 0 when mean > 0 (M4 mutation guard)"
+        )
         assert "timestamp_start" in act
         assert "timestamp_end" in act
 
@@ -171,6 +173,20 @@ class TestTraceAndForkRecorded:
         gmt_app.execute_activity_graph("buy", AND_FORK_CONFIG, trace, dry_run=True)
         join_event = next(e for e in trace if e["type"] == "and_join")
         assert join_event["to"] == "display"
+
+    def test_and_fork_dry_run_branch_tags(self):
+        """AND-fork activities in dry-run must have 'branch' tag (M2 mutation)."""
+        trace = []
+        gmt_app.execute_activity_graph("buy", AND_FORK_CONFIG, trace, dry_run=True)
+        fork_idx = next(i for i, e in enumerate(trace) if e["type"] == "and_fork")
+        join_idx = next(i for i, e in enumerate(trace) if e["type"] == "and_join")
+        fork_activities = [
+            e for e in trace[fork_idx + 1 : join_idx] if e["type"] == "activity"
+        ]
+        assert len(fork_activities) == 2
+        for event in fork_activities:
+            assert "branch" in event, f"Activity '{event['name']}' missing 'branch' tag"
+            assert event["branch"] in ("pack", "ship")
 
 
 class TestTraceOrForkRecorded:
