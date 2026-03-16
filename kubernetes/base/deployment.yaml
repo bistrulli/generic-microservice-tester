@@ -15,7 +15,9 @@ spec:
       containers:
       - name: app
         # IMPORTANT: Replace this with the actual name of your Docker image
-        image: rpizziol/generic-microservice-tester:latest
+        #image: rpizziol/generic-microservice-tester:latest
+        image: bistrulli/generic-microservice-tester:0.1
+        pullPolicy: Always
         ports:
         - containerPort: 8080
         env:

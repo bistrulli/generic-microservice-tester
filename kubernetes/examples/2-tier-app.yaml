@@ -19,29 +19,29 @@ spec:
     spec:
       containers:
       - name: app
-        # Make sure this is the correct name of your image
-        image: rpizziol/generic-microservice-tester:latest
+        image: bistrulli/generic-microservice-tester:0.1
+        imagePullPolicy: Always
         ports:
         - containerPort: 8080
         env:
         - name: SERVICE_NAME
           value: "entry-svc"
         - name: SERVICE_TIME_SECONDS
-          value: "0.05" # Entry service simulates a small amount of work, 50ms
+          value: "0.1"
         - name: OUTBOUND_CALLS
           # Always makes a synchronous call to the 'backend-svc' service
           value: "SYNC:backend-svc:1.0"
         - name: GUNICORN_WORKERS
-          value: "2"
+          value: "1"
         - name: GUNICORN_THREADS
-          value: "4"
+          value: "1"
 
 ---
 # --- ENTRYPOINT SERVICE ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: entry-svc
+  name: task1-svc
 spec:
   selector:
     app: entry
@@ -69,20 +69,21 @@ spec:
     spec:
       containers:
       - name: app
-        image: rpizziol/generic-microservice-tester:latest
+        image: bistrulli/generic-microservice-tester:0.1
+        imagePullPolicy: Always
         ports:
         - containerPort: 8080
         env:
         - name: SERVICE_NAME
           value: "backend"
         - name: SERVICE_TIME_SECONDS
-          value: "0.2" # Backend simulates more work, 200ms
+          value: "0.1" # Backend simulates more work, 200ms
         - name: OUTBOUND_CALLS
           value: "" # This service calls no other services
         - name: GUNICORN_WORKERS
-          value: "2"
+          value: "1"
         - name: GUNICORN_THREADS
-          value: "4"
+          value: "1"
 
 ---
 # --- BACKEND SERVICE ---

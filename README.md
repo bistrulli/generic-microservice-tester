@@ -146,7 +146,7 @@ By applying this single file, you have just created a 3-tier application without
 | Variable             | Description                                                             | Format / Example                                                   |
 |-----------------------|------------------------------------------------------------------------|----------------------------------------------------------------------|
 | `SERVICE_NAME`        | A friendly name for the service instance, returned in the JSON response. | `frontend-service`                                                  |
-| `SERVICE_TIME_SECONDS`| Simulates CPU work by busy-waiting for the specified duration (in seconds). Accepts float values. | `0.2` (for 200ms) |
+| `SERVICE_TIME_SECONDS`| **Mean** of exponential distribution for CPU work simulation. Each request samples a random service time from an exponential distribution with this mean. Provides realistic stochastic behavior. | `0.2` (mean 200ms, actual times vary) |
 | `GUNICORN_WORKERS`    | The number of Gunicorn worker processes to spawn. A good starting point is (2 * number of cores) + 1. | `2` |
 | `GUNICORN_THREADS`    | The number of threads per worker. Useful for I/O-bound tasks. | `4` |
 | `OUTBOUND_CALLS`      | A comma-separated list defining the outbound HTTP calls to make upon receiving a request. | `TYPE:service_name:probability` |
@@ -172,6 +172,57 @@ This configuration will:
 - Always send an asynchronous, non-blocking call to `logger-svc`.
 - Then, make a single synchronous, blocking call to either `backend-a` (60% chance) or `backend-b` (40% chance).
 
+## Stochastic Service Time Modeling
+
+This microservice implements **realistic stochastic service times** using exponential distribution to better simulate real-world microservice behavior.
+
+### Service Time Behavior
+
+- **Exponential Distribution**: Each request samples CPU work time from an exponential distribution
+- **Mean Parameter**: `SERVICE_TIME_SECONDS` specifies the mean (λ⁻¹) of the exponential distribution
+- **Realistic Variability**: Service times vary naturally - some requests complete quickly, others take longer
+- **Mathematical Accuracy**: Follows exponential distribution properties (memoryless, heavy tail)
+
+### Example Behavior
+
+```yaml
+env:
+- name: SERVICE_TIME_SECONDS
+  value: "0.2"  # Mean service time of 200ms
+```
+
+**Sample outputs:**
+- Request 1: 0.05s (fast completion)
+- Request 2: 0.18s (near mean)
+- Request 3: 0.73s (long tail event)
+- Request 4: 0.12s (typical)
+
+This provides more realistic load patterns for testing autoscalers, monitoring systems, and performance analysis.
+
+## LQN-Semantic Compliance for Asynchronous Calls
+
+This microservice implements **LQN (Layered Queueing Network) semantic compliance** for asynchronous calls to support accurate performance modeling and prediction.
+
+### Key Features
+
+- **Process Isolation**: Asynchronous calls (`ASYNC` type) are executed in completely separate processes
+- **Zero Interference**: Async calls do not compete for CPU, memory, or HTTP connection resources with the main service
+- **True "Send-No-Reply"**: Implements genuine fire-and-forget semantics as defined in LQN theory
+- **Accurate Metrics**: CPU timing and throughput measurements exclude async call overhead
+
+### Technical Implementation
+
+- **Main Process**: Handles synchronous calls and core service logic using shared HTTP session
+- **Isolated Processes**: Each async call spawns a separate Python process with independent resources
+- **No Blocking**: The main process continues immediately after delegating async calls
+- **Resource Separation**: Async processes use dedicated HTTP sessions and connection pools
+
+### Response Status Codes
+
+- **Synchronous calls**: Return actual HTTP status codes (e.g., `200`, `404`, `500`)
+- **Asynchronous calls**: Return `"async_delegated"` to indicate successful delegation to isolated process
+
+This architecture ensures that performance measurements and LQN model predictions align accurately with real-world behavior.
 
 ## Author
 Roberto Pizziol
