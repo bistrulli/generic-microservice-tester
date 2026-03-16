@@ -102,7 +102,7 @@ metadata:
   name: python-instrumentation
 spec:
   exporter:
-    endpoint: http://otel-collector.observability:4317
+    endpoint: http://otel-collector.observability:4318
   propagators:
   - tracecontext
   - baggage

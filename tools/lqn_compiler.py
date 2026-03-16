@@ -281,7 +281,7 @@ spec:
         - name: OTEL_SERVICE_NAME
           value: "{k8s_name}"
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
-          value: "http://otel-collector.observability:4317"
+          value: "http://otel-collector.observability:4318"
         - name: OTEL_TRACES_EXPORTER
           value: "otlp"
         - name: OTEL_METRICS_EXPORTER

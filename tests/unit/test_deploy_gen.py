@@ -105,7 +105,7 @@ class TestOtelCompliance:
         assert "autoinstrumentation-python" in script
 
     def test_instrumentation_cr_has_endpoint(self, script: str) -> None:
-        assert "otel-collector.observability:4317" in script
+        assert "otel-collector.observability:4318" in script
 
     def test_nodeport_propagated(self) -> None:
         s, _ = generate_deploy_script(MODEL, node_port=30089)
