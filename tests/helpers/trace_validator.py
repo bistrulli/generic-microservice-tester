@@ -326,7 +326,7 @@ def _validate_completeness(
             join_key = tuple(sorted(and_forks[current]))
             if join_key in and_joins:
                 walk(and_joins[join_key])
-            return
+            return  # join target's walk() handles its own successors
 
         if current in or_forks:
             # OR-fork: walk whichever branch was actually taken
