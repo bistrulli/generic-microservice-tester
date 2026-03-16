@@ -1,9 +1,16 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
 *$py.class
 
-# C extensions
+# C extensions — NOTE: busy_wait.so is committed intentionally via Docker build,
+# but local .so files from dev builds should be ignored
 *.so
 
 # Distribution / packaging

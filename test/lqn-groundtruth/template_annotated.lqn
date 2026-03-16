@@ -1,0 +1,86 @@
+G
+"Name of the model"
+0.0001
+500
+1
+0.5
+-1
+
+#processor definition block
+P 0  
+# Processor parameters, in form:
+# p ProcessorName Scheduling [multiplicity, default = 1]
+#	Scheduling = f (fifo) 
+#	multiplicity = m value (multiprocessor)|i (infinite)
+# 	
+p PClient f m 2
+p PServer f m 2
+p PDisk f m 2
+-1
+
+#task definition block
+T 0 
+# Task parameters, of form:
+# t TaskName RefFlag EntryList -1 Processor [thinktime] [multiplicity]
+#	RefFlag = r (reference or user)|n (non-reference)
+#	multiplicity = m value
+#	thinktime = z value (idle time without processor use after finishing)
+#	
+t TClient r client -1 PClient z 0.01 m 2
+t TServer n visit buy notify save -1 PServer m 2
+t TFileServer n read write -1 PDisk
+t TBackup n get update -1 PDisk
+-1
+
+#entry definition block
+E 0 	
+# Entry parameters, of form:
+# s Entryname Phase1Time Phase2Time ... -1 (Entry definition with time demands for all phases)
+# A Entryname FirstActivity (Entry definition with start of diagram)
+# y FromEntry ToEntry Phase1Calls Phase2Calls ... -1 (Synchronous calls)
+# z FromEntry ToEntry Phase1Calls Phase2Calls ... -1 (Asynchronous calls)
+# Z Entryname time (Entry thinktime)
+#
+s client 0.01 -1
+y client visit 3.0 -1
+y client save 1.0 -1
+z client notify 1.0 -1
+y client read 1.0 -1
+y client buy 1.2 -1  #average number of calls: chance of 0.2 for sending a second request
+A visit cache
+A buy prepare
+s save 0.02 -1
+y save write 1.0 -1
+s notify 0.08 -1
+s read 0.01 -1
+s write 0.001 0.04 -1
+y write get 0.0 1.0 -1
+y write update 0.0 1.0 -1
+s get 0.01 -1
+s update 0.01 -1
+-1
+
+#activity definition blocks for tasks (here: task TServer)
+A TServer 
+# Activity parameters, of form:
+# s Activityname Time (Activity definition with time demand)
+# y Activity Entry Calls (Synchronous calls)
+# z Activity Entry Calls (Asynchronous calls)
+#	 
+ s prepare 0.01
+ s pack 0.03
+ s ship 0.01
+ s display 0.001
+ s cache 0.001
+ s internal 0.001
+ s external 0.003
+ y external read 1.0
+:
+# Diagram section:
+ prepare -> pack & ship; 					#fork
+ pack & ship -> display; 					#join
+ cache -> (0.95)internal + (0.05)external; 	#choice
+ internal[visit]; 							#reply, diagram end
+ external[visit];
+ display[buy] 								#no semicolon on last line
+-1
