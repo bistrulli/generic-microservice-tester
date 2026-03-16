@@ -342,7 +342,9 @@ def execute_activity(
     results = []
 
     st = act_def.get("service_time", 0.0)
+    ts_start = time.monotonic()
     sampled = do_busy_wait(st, dry_run=dry_run) if st > 0 else 0.0
+    ts_end = time.monotonic()
 
     if trace is not None:
         trace.append(
@@ -351,6 +353,8 @@ def execute_activity(
                 "name": activity_name,
                 "service_time_mean": st,
                 "service_time_sampled": sampled,
+                "timestamp_start": ts_start,
+                "timestamp_end": ts_end,
             }
         )
 
@@ -391,9 +395,7 @@ def execute_and_fork(
         # Sequential execution in dry-run — deterministic, no threading
         results = []
         for branch_name in branches:
-            results.extend(
-                execute_activity(branch_name, config, trace, dry_run)
-            )
+            results.extend(execute_activity(branch_name, config, trace, dry_run))
         return results
 
     # Real execution: parallel threads with per-branch sub-traces
@@ -499,9 +501,7 @@ def execute_activity_graph(
         if current in and_forks:
             results.extend(execute_activity(current, config, trace, dry_run))
             fork_branches = and_forks[current]
-            results.extend(
-                execute_and_fork(fork_branches, config, trace, dry_run)
-            )
+            results.extend(execute_and_fork(fork_branches, config, trace, dry_run))
             join_key = tuple(sorted(fork_branches))
             if join_key in and_joins:
                 if trace is not None:
@@ -578,6 +578,9 @@ def execute_phase_entry(
         results.extend(
             execute_mean_calls(target_url, mean_calls, "ASYNC", trace, dry_run)
         )
+
+    if trace is not None:
+        trace.append({"type": "reply", "activity": entry_name, "entry": entry_name})
 
     return results
 

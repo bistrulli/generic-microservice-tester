@@ -7,6 +7,7 @@ interprets the LQN model. Uses trace matching (trace membership in CFG).
 
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -18,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "helpers"))
 import app as gmt_app
 from lqn_compiler import build_task_config
 from lqn_parser import parse_lqn_file
-from trace_validator import validate_trace
+from trace_validator import validate_and_fork_parallelism, validate_trace
 
 GROUNDTRUTH = (
     Path(__file__).parent.parent.parent
@@ -201,3 +202,159 @@ class TestTraceMatchingSave:
         assert any("write" in t for t in targets), (
             f"Expected sync_call to 'write', got: {targets}"
         )
+
+
+# --- Gap 1: Reply for phase entries ---
+
+
+class TestPhaseEntryReply:
+    def test_notify_ends_with_reply(self, tserver_config):
+        """Phase entries must now emit a reply event."""
+        trace = []
+        gmt_app.execute_activity_graph("notify", tserver_config, trace, dry_run=True)
+        assert trace[-1]["type"] == "reply", (
+            f"notify trace should end with reply, got: {trace[-1]}"
+        )
+        assert trace[-1]["entry"] == "notify"
+
+    def test_save_ends_with_reply(self, tserver_config):
+        trace = []
+        gmt_app.execute_activity_graph("save", tserver_config, trace, dry_run=True)
+        assert trace[-1]["type"] == "reply"
+        assert trace[-1]["entry"] == "save"
+
+
+# --- Gap 2: Validate activity outbound calls match config ---
+
+
+class TestActivityCallsMatchConfig:
+    def test_external_activity_has_read_call(self, tserver_config):
+        """Activity 'external' in TServer has sync_call to read.
+        Validate the trace contains it when external is chosen."""
+        import random
+
+        for seed in range(1000):
+            random.seed(seed)
+            trace = []
+            gmt_app.execute_activity_graph("visit", tserver_config, trace, dry_run=True)
+            or_fork = next(e for e in trace if e["type"] == "or_fork")
+            if or_fork["chosen"] == "external":
+                # Validate the full trace including calls
+                valid, reason = validate_trace(trace, tserver_config, "visit")
+                assert valid, f"Trace invalid: {reason}\nTrace: {trace}"
+                # Check sync_call to read is present after external activity
+                sync_calls = [e for e in trace if e["type"] == "sync_call"]
+                assert len(sync_calls) >= 1, (
+                    "external path should have sync_call to read"
+                )
+                return
+        pytest.skip("Could not find seed that selects 'external'")
+
+
+# --- Gap 3: Validate service_time_mean matches config ---
+
+
+class TestServiceTimeMeansMatchConfig:
+    def test_buy_activities_service_times(self, tserver_config):
+        """Service time means in trace must match config values."""
+        trace = []
+        gmt_app.execute_activity_graph("buy", tserver_config, trace, dry_run=True)
+        activities_config = tserver_config["activities"]
+
+        for event in trace:
+            if event["type"] != "activity":
+                continue
+            name = event["name"]
+            expected = activities_config[name].get("service_time", 0.0)
+            actual = event["service_time_mean"]
+            assert actual == pytest.approx(expected), (
+                f"Activity '{name}': service_time_mean={actual} != config={expected}"
+            )
+
+    def test_visit_cache_service_time(self, tserver_config):
+        trace = []
+        gmt_app.execute_activity_graph("visit", tserver_config, trace, dry_run=True)
+        cache_event = next(
+            e for e in trace if e["type"] == "activity" and e["name"] == "cache"
+        )
+        assert cache_event["service_time_mean"] == pytest.approx(0.001)
+
+
+# --- Gap 4: AND-fork parallelism verification via timestamps ---
+
+
+class TestAndForkParallelism:
+    """Test AND-fork parallelism using timestamps from REAL execution.
+
+    Uses a custom config with large service times (0.15s per branch)
+    to make parallelism clearly observable above thread overhead.
+    """
+
+    PARALLEL_CONFIG = {
+        "task_name": "TParallel",
+        "entries": {"run": {"start_activity": "start"}},
+        "activities": {
+            "start": {"service_time": 0.0},
+            "branch_a": {"service_time": 0.15},
+            "branch_b": {"service_time": 0.15},
+            "finish": {"service_time": 0.0},
+        },
+        "graph": {
+            "sequences": [],
+            "or_forks": [],
+            "and_forks": [{"from": "start", "branches": ["branch_a", "branch_b"]}],
+            "and_joins": [{"branches": ["branch_a", "branch_b"], "to": "finish"}],
+            "replies": {"finish": "run"},
+        },
+    }
+
+    @patch.object(gmt_app.np.random, "exponential", side_effect=[0.15, 0.15])
+    def test_and_fork_parallel_real_execution(self, mock_exp):
+        """Run AND-fork with REAL execution, verify branches overlap in time."""
+        trace = []
+        gmt_app.execute_activity_graph(
+            "run", self.PARALLEL_CONFIG, trace, dry_run=False
+        )
+
+        valid, reason = validate_and_fork_parallelism(trace)
+        assert valid, f"AND-fork not parallel: {reason}"
+
+    @patch.object(gmt_app.np.random, "exponential", side_effect=[0.15, 0.15])
+    def test_and_fork_wall_clock_less_than_sum(self, mock_exp):
+        """Wall-clock ~0.15s (max), not ~0.30s (sum)."""
+        trace = []
+        gmt_app.execute_activity_graph(
+            "run", self.PARALLEL_CONFIG, trace, dry_run=False
+        )
+
+        and_fork = next(e for e in trace if e["type"] == "and_fork")
+        and_join = next(e for e in trace if e["type"] == "and_join")
+        fork_idx = trace.index(and_fork)
+        join_idx = trace.index(and_join)
+
+        between = trace[fork_idx + 1 : join_idx]
+        branch_acts = [e for e in between if e["type"] == "activity"]
+
+        starts = [a["timestamp_start"] for a in branch_acts]
+        ends = [a["timestamp_end"] for a in branch_acts]
+        wall_clock = max(ends) - min(starts)
+        sum_durations = sum(e - s for s, e in zip(starts, ends))
+
+        ratio = wall_clock / sum_durations
+        assert ratio < 0.75, (
+            f"AND-fork appears sequential: wall={wall_clock:.4f}s, "
+            f"sum={sum_durations:.4f}s, ratio={ratio:.2f}"
+        )
+
+    def test_timestamps_present_on_activities(self, tserver_config):
+        """All activity events must have timestamp_start and timestamp_end."""
+        trace = []
+        gmt_app.execute_activity_graph("buy", tserver_config, trace, dry_run=True)
+        for event in trace:
+            if event["type"] == "activity":
+                assert "timestamp_start" in event, (
+                    f"Activity '{event['name']}' missing timestamp_start"
+                )
+                assert "timestamp_end" in event, (
+                    f"Activity '{event['name']}' missing timestamp_end"
+                )

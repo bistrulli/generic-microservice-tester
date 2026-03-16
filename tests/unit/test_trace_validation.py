@@ -257,6 +257,7 @@ class TestValidatePhaseEntry:
                 "service_time_mean": 0.08,
                 "service_time_sampled": 0.07,
             },
+            {"type": "reply", "activity": "notify", "entry": "notify"},
         ]
         valid, reason = validate_trace(trace, PHASE_CONFIG, "notify")
         assert valid, reason
@@ -270,6 +271,7 @@ class TestValidatePhaseEntry:
                 "service_time_sampled": 0.02,
             },
             {"type": "sync_call", "target": "backend-svc/write"},
+            {"type": "reply", "activity": "save", "entry": "save"},
         ]
         valid, reason = validate_trace(trace, PHASE_CALL_CONFIG, "save")
         assert valid, reason
@@ -282,11 +284,26 @@ class TestValidatePhaseEntry:
                 "service_time_mean": 0.02,
                 "service_time_sampled": 0.02,
             },
+            {"type": "reply", "activity": "save", "entry": "save"},
             # Missing sync_call to backend-svc/write
         ]
         valid, reason = validate_trace(trace, PHASE_CALL_CONFIG, "save")
         assert not valid
         assert "sync_call" in reason.lower() or "backend" in reason.lower()
+
+    def test_phase_missing_reply_invalid(self):
+        trace = [
+            {
+                "type": "phase_entry",
+                "name": "notify",
+                "service_time_mean": 0.08,
+                "service_time_sampled": 0.07,
+            },
+            # Missing reply!
+        ]
+        valid, reason = validate_trace(trace, PHASE_CONFIG, "notify")
+        assert not valid
+        assert "reply" in reason.lower()
 
 
 class TestValidateEmptyTrace:

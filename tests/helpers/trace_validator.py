@@ -18,11 +18,13 @@ def validate_trace(
     Returns (True, "") if valid, (False, "reason") if invalid.
 
     Rules:
-    1. Every 'activity' event must reference a valid activity or entry name
+    1. Every 'activity' event must reference a valid activity name
     2. For 'and_fork': all branch names must appear as activities before 'and_join'
     3. For 'or_fork': exactly one 'chosen' branch must appear as activity after fork
     4. 'reply' must be last event and reference the correct entry
     5. Sequence ordering: if A->B in sequences, A must appear before B in trace
+    6. Activity service_time_mean must match config
+    7. Activity outbound calls must match config (sync_calls, async_calls)
     """
     if not trace:
         return False, "Empty trace"
@@ -73,6 +75,16 @@ def _validate_phase_trace(
             if not any(e["target"] == target for e in async_events):
                 return False, f"Expected async_call to '{target}' not found in trace"
 
+    # Reply must be last event
+    last = trace[-1]
+    if last["type"] != "reply":
+        return False, f"Phase trace: last event is '{last['type']}', expected 'reply'"
+    if last.get("entry") != entry_name:
+        return (
+            False,
+            f"Phase trace: reply entry '{last.get('entry')}' != '{entry_name}'",
+        )
+
     return True, ""
 
 
@@ -114,6 +126,16 @@ def _validate_activity_trace(
     # --- Rule 5: Sequence ordering ---
     sequences = graph.get("sequences", [])
     ok, msg = _validate_sequence_order(trace, sequences)
+    if not ok:
+        return False, msg
+
+    # --- Rule 6: Activity service_time_mean matches config ---
+    ok, msg = _validate_service_times(trace, activities)
+    if not ok:
+        return False, msg
+
+    # --- Rule 7: Activity outbound calls match config ---
+    ok, msg = _validate_activity_calls(trace, activities)
     if not ok:
         return False, msg
 
@@ -166,7 +188,6 @@ def _validate_or_forks(trace: list[dict]) -> tuple[bool, str]:
         all_branches = set(event["branches"])
         not_chosen = all_branches - {chosen}
 
-        # The chosen branch must appear as an activity after the fork
         fork_idx = trace.index(event)
         after_fork = trace[fork_idx + 1 :]
 
@@ -177,10 +198,7 @@ def _validate_or_forks(trace: list[dict]) -> tuple[bool, str]:
         if chosen not in activity_names_after:
             return False, f"OR-fork chose '{chosen}' but it's not in trace after fork"
 
-        # Non-chosen branches must NOT appear (as direct activities, not nested)
-        # Only check immediate next activities, not deeply nested ones
         for nc in not_chosen:
-            # Check if nc appears as a direct activity (without branch tag from AND-fork)
             for e in after_fork:
                 if e["type"] == "activity" and e["name"] == nc and "branch" not in e:
                     return (
@@ -193,7 +211,6 @@ def _validate_or_forks(trace: list[dict]) -> tuple[bool, str]:
 
 def _validate_sequence_order(trace: list[dict], sequences: list) -> tuple[bool, str]:
     """Validate that sequence ordering is respected in the trace."""
-    # Build activity index: name -> first occurrence position
     activity_positions: dict[str, int] = {}
     for i, event in enumerate(trace):
         if event["type"] == "activity":
@@ -211,5 +228,150 @@ def _validate_sequence_order(trace: list[dict], sequences: list) -> tuple[bool, 
                         f"Sequence violation: '{a}' (pos {activity_positions[a]}) "
                         f"should come before '{b}' (pos {activity_positions[b]})",
                     )
+
+    return True, ""
+
+
+def _validate_service_times(trace: list[dict], activities: dict) -> tuple[bool, str]:
+    """Validate that activity service_time_mean in trace matches config."""
+    for event in trace:
+        if event["type"] != "activity":
+            continue
+        name = event["name"]
+        if name not in activities:
+            continue
+        expected_st = activities[name].get("service_time", 0.0)
+        actual_st = event.get("service_time_mean", 0.0)
+        if abs(actual_st - expected_st) > 1e-9:
+            return (
+                False,
+                f"Activity '{name}': service_time_mean={actual_st} "
+                f"!= config={expected_st}",
+            )
+    return True, ""
+
+
+def _validate_activity_calls(trace: list[dict], activities: dict) -> tuple[bool, str]:
+    """Validate that outbound calls following each activity match its config.
+
+    For each activity event in the trace, checks that any sync_call/async_call
+    events immediately following it (before the next activity/fork/join/reply)
+    match the sync_calls/async_calls defined in the activity config.
+    """
+    for i, event in enumerate(trace):
+        if event["type"] != "activity":
+            continue
+
+        name = event["name"]
+        if name not in activities:
+            continue
+
+        act_config = activities[name]
+        expected_sync = set(act_config.get("sync_calls", {}).keys())
+        expected_async = set(act_config.get("async_calls", {}).keys())
+
+        # Collect call events immediately after this activity
+        actual_sync = set()
+        actual_async = set()
+        for j in range(i + 1, len(trace)):
+            next_evt = trace[j]
+            if next_evt["type"] == "sync_call":
+                actual_sync.add(next_evt["target"])
+            elif next_evt["type"] == "async_call":
+                actual_async.add(next_evt["target"])
+            else:
+                # Stop at next non-call event
+                break
+
+        # Check expected calls are present
+        missing_sync = expected_sync - actual_sync
+        if missing_sync:
+            return (
+                False,
+                f"Activity '{name}': missing sync_calls {missing_sync}",
+            )
+
+        missing_async = expected_async - actual_async
+        if missing_async:
+            return (
+                False,
+                f"Activity '{name}': missing async_calls {missing_async}",
+            )
+
+    return True, ""
+
+
+def validate_and_fork_parallelism(
+    trace: list[dict], max_sequential_ratio: float = 0.85
+) -> tuple[bool, str]:
+    """Validate that AND-fork branches actually executed in parallel using timestamps.
+
+    For each AND-fork in the trace, checks that the branch activity timestamps
+    overlap (i.e., branches started concurrently, not sequentially).
+
+    Args:
+        trace: Execution trace with timestamp_start/timestamp_end on activities.
+        max_sequential_ratio: If wall-clock / sum-of-branches > this, likely sequential.
+
+    Returns (True, "") if parallel, (False, "reason") if sequential.
+    """
+    for i, event in enumerate(trace):
+        if event["type"] != "and_fork":
+            continue
+
+        expected_branches = set(event["branches"])
+
+        # Find corresponding join
+        join_idx = None
+        for j in range(i + 1, len(trace)):
+            if trace[j]["type"] == "and_join":
+                if set(trace[j]["branches"]) == expected_branches:
+                    join_idx = j
+                    break
+
+        if join_idx is None:
+            return False, f"AND-fork {expected_branches}: no matching join"
+
+        # Collect branch activity timestamps
+        between = trace[i + 1 : join_idx]
+        branch_activities = [
+            e
+            for e in between
+            if e["type"] == "activity" and e["name"] in expected_branches
+        ]
+
+        if len(branch_activities) < 2:
+            continue  # Single branch, nothing to check
+
+        # Check timestamp overlap
+        starts = [
+            a["timestamp_start"] for a in branch_activities if "timestamp_start" in a
+        ]
+        ends = [a["timestamp_end"] for a in branch_activities if "timestamp_end" in a]
+
+        if not starts or not ends:
+            return (
+                False,
+                f"AND-fork {expected_branches}: missing timestamps on branch activities",
+            )
+
+        # Wall-clock for the fork region: from earliest start to latest end
+        wall_clock = max(ends) - min(starts)
+        # Sum of individual branch durations
+        sum_durations = sum(e - s for s, e in zip(starts, ends))
+
+        if sum_durations <= 0:
+            continue  # Zero-duration activities, skip
+
+        # If truly parallel: wall_clock ≈ max(durations), much less than sum
+        # If sequential: wall_clock ≈ sum(durations)
+        ratio = wall_clock / sum_durations
+        if ratio > max_sequential_ratio:
+            return (
+                False,
+                f"AND-fork {expected_branches}: appears SEQUENTIAL. "
+                f"wall_clock={wall_clock:.4f}s, sum_branches={sum_durations:.4f}s, "
+                f"ratio={ratio:.2f} (threshold={max_sequential_ratio})",
+            )
 
     return True, ""
