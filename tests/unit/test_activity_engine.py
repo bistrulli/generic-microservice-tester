@@ -116,12 +116,18 @@ class TestDoBusyWait:
         result = gmt_app.do_busy_wait(-1.0)
         assert result == 0.0
 
-    def test_positive_consumes_cpu(self):
-        start = time.monotonic()
-        result = gmt_app.do_busy_wait(0.05)
-        elapsed = time.monotonic() - start
-        assert result > 0
-        assert elapsed >= 0.02  # should take some time
+    def test_exponential_distribution(self):
+        """10k samples in dry-run: mean and variance must match Exp(0.05)."""
+        mean_param = 0.05
+        samples = [gmt_app.do_busy_wait(mean_param, dry_run=True) for _ in range(10000)]
+        mean = sum(samples) / len(samples)
+        variance = sum((s - mean) ** 2 for s in samples) / len(samples)
+        # Exponential: E[X] = lambda, Var[X] = lambda^2
+        assert 0.045 < mean < 0.055, f"Mean {mean:.4f} not close to {mean_param}"
+        assert 0.0015 < variance < 0.004, (
+            f"Variance {variance:.5f} not close to {mean_param**2} = 0.0025"
+        )
+        assert all(s > 0 for s in samples), "All samples must be positive"
 
 
 class TestExecuteMeanCalls:
