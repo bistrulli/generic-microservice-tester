@@ -537,6 +537,9 @@ def execute_activity_graph(
                     )
                 current = and_joins[join_key]
             else:
+                print(
+                    f"[LQN] WARNING: no matching AND-join for branches {fork_branches}"
+                )
                 break
             continue
 
