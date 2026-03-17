@@ -362,17 +362,16 @@ class TestHandleRequestEntryRouting:
             resp = client.get("/nonexistent")
             assert resp.status_code == 404
 
-    def test_default_entry(self, client):
-        """GET / with LQN config uses first entry."""
+    def test_root_redirects_to_first_entry(self, client):
+        """GET / with LQN config redirects 307 to first entry."""
         with patch.dict(
             os.environ,
             {"LQN_TASK_CONFIG": json.dumps(SIMPLE_CONFIG)},
             clear=False,
         ):
             resp = client.get("/")
-            assert resp.status_code == 200
-            data = resp.get_json()
-            assert data["entry"] == "hello"
+            assert resp.status_code == 307
+            assert resp.headers["Location"].endswith("/hello")
 
 
 class TestCycleDetection:
