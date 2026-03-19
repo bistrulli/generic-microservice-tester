@@ -24,7 +24,9 @@ The project is organized into three main directories to keep the source code, co
 │   ├── busy_wait.c         # C extension for GIL-releasing CPU busy-wait
 │   └── requirements.txt    # Python dependencies
 ├── tools/
-│   ├── lqn_compiler.py     # LQN-to-K8s manifest compiler
+│   ├── lqn_compiler.py     # LQN-to-K8s manifest compiler (OTEL-compliant)
+│   ├── locustfile_gen.py   # Generate Locust locustfile from LQN reference task
+│   ├── deploy_gen.py       # Generate deploy.sh (up/down/test) with in-cluster Locust
 │   ├── lqsim_runner.py     # lqsim wrapper: run simulations, parse .p output
 │   └── lqn_model_utils.py  # Parametric LQN model generation (e.g., change multiplicity)
 ├── docker/
@@ -33,7 +35,7 @@ The project is organized into three main directories to keep the source code, co
 ├── kubernetes/
 │   ├── base/               # Generic deployment + service templates
 │   └── examples/           # Ready-to-use topologies (2-tier, chain, choice)
-├── tests/                  # pytest test suite (171 unit + E2E)
+├── tests/                  # pytest test suite (227 unit + E2E)
 │   ├── unit/               # Parser, compiler, engine, trace validation
 │   ├── e2e/                # Docker E2E (utilization, lqsim, closed-loop) + K8s topology
 │   └── helpers/            # Trace validator utility

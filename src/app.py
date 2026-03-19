@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, wait as futures_wait
 
 import numpy as np
 import requests
-from flask import Flask, jsonify
+from flask import Flask, jsonify, redirect
 from requests.adapters import HTTPAdapter
 
 app = Flask(__name__)
@@ -614,14 +614,28 @@ def execute_phase_entry(
 # --- Route Handlers ---
 
 
-@app.route("/")
 @app.route("/<entry_name>")
-def handle_request(entry_name=None):
-    """Main endpoint. Dispatches to LQN engine or legacy handler."""
+def handle_request(entry_name):
+    """LQN entry endpoint or legacy handler."""
     config = load_task_config()
-
     if config:
         return handle_lqn_request(entry_name, config)
+    return handle_legacy_request()
+
+
+@app.route("/")
+def handle_root():
+    """Root: redirect to first LQN entry, or legacy handler.
+
+    Separated from handle_request so OTEL sees only GET /<entry_name>
+    as the real operation — avoids duplicate spans in Jaeger.
+    """
+    config = load_task_config()
+    if config:
+        entries = config.get("entries", {})
+        first = next(iter(entries), None)
+        if first:
+            return redirect(f"/{first}", code=307)
     return handle_legacy_request()
 
 
@@ -633,10 +647,7 @@ def handle_lqn_request(entry_name: str | None, config: dict):
     trace_enabled = dry_run or os.environ.get("LQN_TRACE", "0") == "1"
     trace = [] if trace_enabled else None
 
-    if not entry_name:
-        entry_name = next(iter(entries)) if entries else None
-
-    if not entry_name or entry_name not in entries:
+    if entry_name not in entries:
         return jsonify({"error": f"Unknown entry: {entry_name}"}), 404
 
     results = execute_activity_graph(entry_name, config, trace, dry_run)

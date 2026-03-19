@@ -209,7 +209,7 @@ class TestOtelEnvVars:
 
     def test_otel_exporter_endpoint(self, model):
         yaml_str = compile_model(model)
-        assert "http://otel-collector.observability:4317" in yaml_str
+        assert "http://otel-collector.observability:4318" in yaml_str
 
     def test_otel_traces_exporter(self, model):
         yaml_str = compile_model(model)

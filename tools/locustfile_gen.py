@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Generate a Locust locustfile from the reference task of an LQN model.
 
-The reference task (load generator) defines the closed-loop workload:
-think time (z), number of clients (m), and which entries to call (y/z).
+The reference task (load generator) defines the closed-loop workload.
+The generated locustfile faithfully reproduces the reference task's activity
+graph: service times become deterministic time.sleep(), sync/async calls
+become HTTP requests with relative URLs.
 
 Usage:
     python tools/locustfile_gen.py model.lqn
@@ -26,27 +28,83 @@ except ImportError:
     from lqn_compiler import resolve_call_target
 
 
-def _extract_activity_calls(
-    task: LqnTask,
-) -> list[tuple[str, float, str]]:
-    """Walk the activity graph of a task and extract all sync/async calls.
+def _resolve_entry_path(model: LqnModel, entry_name: str) -> str | None:
+    """Resolve an LQN entry name to a relative URL path (e.g., '/Entr1')."""
+    result = resolve_call_target(model, entry_name)
+    if result is None:
+        return None
+    _svc_name, path = result
+    return f"/{path}"
 
-    Returns list of (target_entry, mean_calls, call_type) from all activities
-    reachable via DFS from each entry's start_activity.
+
+def _walk_activity_graph(
+    task: LqnTask,
+    model: LqnModel,
+    indent: str = "        ",
+) -> list[str]:
+    """Walk the activity graph of a task and generate Python code lines.
+
+    For each activity visited (in graph order via DFS):
+    - service_time > 0 → time.sleep(service_time)
+    - sync_calls → self.client.get("/<entry>") with relative URL
+    - async_calls → self.client.get("/<entry>") (fire-and-forget from Locust side)
+
+    Follows: sequences, or_forks, and_forks, and_joins.
     """
-    calls: list[tuple[str, float, str]] = []
+    lines: list[str] = []
     visited: set[str] = set()
 
-    def dfs(activity_name: str) -> None:
+    def _emit_activity(activity_name: str) -> None:
         if activity_name in visited or activity_name not in task.activities:
             return
         visited.add(activity_name)
 
         act = task.activities[activity_name]
+
+        # Service time → deterministic sleep
+        if act.service_time > 0:
+            lines.append(f"{indent}# {activity_name}: service_time={act.service_time}s")
+            lines.append(f"{indent}time.sleep({act.service_time})")
+
+        # Sync calls → HTTP GET with relative URL
         for target_entry, mean_calls in act.sync_calls:
-            calls.append((target_entry, mean_calls, "sync"))
+            path = _resolve_entry_path(model, target_entry)
+            if not path:
+                continue
+            n_guaranteed = math.floor(mean_calls)
+            frac = round(mean_calls - n_guaranteed, 6)
+
+            lines.append(
+                f"{indent}# {mean_calls} sync call(s) to {target_entry}"
+            )
+            if n_guaranteed == 1 and frac == 0:
+                lines.append(f'{indent}self.client.get("{path}")')
+            elif n_guaranteed > 0:
+                lines.append(f"{indent}for _ in range({n_guaranteed}):")
+                lines.append(f'{indent}    self.client.get("{path}")')
+            if frac > 0:
+                lines.append(f"{indent}if random.random() < {frac}:")
+                lines.append(f'{indent}    self.client.get("{path}")')
+
+        # Async calls → same HTTP GET (Locust doesn't differentiate)
         for target_entry, mean_calls in act.async_calls:
-            calls.append((target_entry, mean_calls, "async"))
+            path = _resolve_entry_path(model, target_entry)
+            if not path:
+                continue
+            n_guaranteed = math.floor(mean_calls)
+            frac = round(mean_calls - n_guaranteed, 6)
+
+            lines.append(
+                f"{indent}# {mean_calls} async call(s) to {target_entry}"
+            )
+            if n_guaranteed == 1 and frac == 0:
+                lines.append(f'{indent}self.client.get("{path}")')
+            elif n_guaranteed > 0:
+                lines.append(f"{indent}for _ in range({n_guaranteed}):")
+                lines.append(f'{indent}    self.client.get("{path}")')
+            if frac > 0:
+                lines.append(f"{indent}if random.random() < {frac}:")
+                lines.append(f'{indent}    self.client.get("{path}")')
 
         # Follow graph edges
         graph = task.activity_graph
@@ -54,95 +112,73 @@ def _extract_activity_calls(
             return
         for src, dst in graph.sequences:
             if src == activity_name:
-                dfs(dst)
+                _emit_activity(dst)
         for src, branches in graph.and_forks:
             if src == activity_name:
                 for b in branches:
-                    dfs(b)
+                    _emit_activity(b)
         for branches, dst in graph.and_joins:
             if activity_name in branches:
-                dfs(dst)
+                _emit_activity(dst)
         for src, branch_list in graph.or_forks:
             if src == activity_name:
                 for _, name in branch_list:
-                    dfs(name)
+                    _emit_activity(name)
 
     for entry in task.entries:
         if entry.start_activity:
-            dfs(entry.start_activity)
+            _emit_activity(entry.start_activity)
 
-    return calls
-
-
-def _resolve_url(model: LqnModel, entry_name: str) -> str | None:
-    """Resolve an LQN entry name to a K8s HTTP URL (port 80)."""
-    result = resolve_call_target(model, entry_name)
-    if result is None:
-        return None
-    svc_name, path = result
-    return f"http://{svc_name}/{path}"
+    return lines
 
 
-def _build_call_list(
+def _build_phase_call_block(
+    ref: LqnTask,
     model: LqnModel,
-    sync_calls: dict[str, list[float]] | None,
-    async_calls: dict[str, list[float]] | None,
-) -> list[tuple[str, float, str]]:
-    """Build ordered list of (url, mean_calls, call_type) from entry calls.
-
-    Returns calls in definition order: sync first, then async.
-    """
-    calls: list[tuple[str, float, str]] = []
-
-    for call_dict, call_type in [
-        (sync_calls, "sync"),
-        (async_calls, "async"),
-    ]:
-        if not call_dict:
-            continue
-        for target_entry, phases in call_dict.items():
-            mean_calls = phases[0] if phases else 0.0
-            if mean_calls <= 0:
-                continue
-            url = _resolve_url(model, target_entry)
-            if url is None:
-                continue
-            calls.append((url, mean_calls, call_type))
-
-    return calls
-
-
-def _generate_call_block(calls: list[tuple[str, float, str]], indent: str = "        ") -> str:
-    """Generate Python code for executing all calls in a cycle."""
-    if not calls:
-        return f"{indent}pass  # reference task has no outbound calls"
-
+    indent: str = "        ",
+) -> list[str]:
+    """Generate call block for phase-based entries (no activity graph)."""
     lines: list[str] = []
-    for url, mean_calls, call_type in calls:
-        n_guaranteed = math.floor(mean_calls)
-        frac = round(mean_calls - n_guaranteed, 6)
 
-        comment = f"# {mean_calls} {call_type} call(s) to {url.split('/')[-1]}"
-        lines.append(f"{indent}{comment}")
+    for entry in ref.entries:
+        for call_dict, call_type in [
+            (entry.phase_sync_calls, "sync"),
+            (entry.phase_async_calls, "async"),
+        ]:
+            if not call_dict:
+                continue
+            for target_entry, phases in call_dict.items():
+                mean_calls = phases[0] if phases else 0.0
+                if mean_calls <= 0:
+                    continue
+                path = _resolve_entry_path(model, target_entry)
+                if not path:
+                    continue
 
-        if n_guaranteed == 1 and frac == 0:
-            lines.append(f'{indent}self.client.get("{url}")')
-        elif n_guaranteed > 0:
-            lines.append(f"{indent}for _ in range({n_guaranteed}):")
-            lines.append(f'{indent}    self.client.get("{url}")')
+                n_guaranteed = math.floor(mean_calls)
+                frac = round(mean_calls - n_guaranteed, 6)
 
-        if frac > 0:
-            lines.append(f"{indent}if random.random() < {frac}:")
-            lines.append(f'{indent}    self.client.get("{url}")')
+                lines.append(
+                    f"{indent}# {mean_calls} {call_type} call(s) to {target_entry}"
+                )
+                if n_guaranteed == 1 and frac == 0:
+                    lines.append(f'{indent}self.client.get("{path}")')
+                elif n_guaranteed > 0:
+                    lines.append(f"{indent}for _ in range({n_guaranteed}):")
+                    lines.append(f'{indent}    self.client.get("{path}")')
+                if frac > 0:
+                    lines.append(f"{indent}if random.random() < {frac}:")
+                    lines.append(f'{indent}    self.client.get("{path}")')
 
-    return "\n".join(lines)
+    return lines
 
 
 def generate_locustfile(model: LqnModel) -> str:
-    """Generate a Locust locustfile from the reference task of an LQN model.
+    """Generate a Locust locustfile that faithfully reproduces the reference task.
 
-    The locustfile implements one LqnClient(HttpUser) with a single @task
-    method that executes all calls per activation cycle, matching LQN semantics.
+    Activity service times become deterministic time.sleep().
+    Sync/async calls become self.client.get("/<entry>") with relative URLs.
+    Locust wait_time is 0 — all timing is modeled inside the cycle method.
 
     Raises:
         ValueError: If no reference task found in the model.
@@ -152,63 +188,49 @@ def generate_locustfile(model: LqnModel) -> str:
         raise ValueError(f"No reference task found in model '{model.name}'")
 
     ref = ref_tasks[0]
-    think_time = ref.think_time
     multiplicity = ref.multiplicity
 
-    # Collect all calls from the reference task.
-    # Phase-based entries have calls in phase_sync_calls/phase_async_calls.
-    # Activity-based entries have calls in the activity objects — walk the graph.
-    all_calls: list[tuple[str, float, str]] = []
-    for entry in ref.entries:
-        phase_calls = _build_call_list(
-            model, entry.phase_sync_calls, entry.phase_async_calls
-        )
-        if phase_calls:
-            all_calls.extend(phase_calls)
+    # Try activity-based generation first (faithful activity graph walk)
+    cycle_lines = _walk_activity_graph(ref, model)
 
-    if not all_calls:
-        # Try activity-based extraction (DFS over activity graph)
-        activity_calls = _extract_activity_calls(ref)
-        for target_entry, mean_calls, call_type in activity_calls:
-            url = _resolve_url(model, target_entry)
-            if url and mean_calls > 0:
-                all_calls.append((url, mean_calls, call_type))
+    # Fallback to phase-based if no activity graph
+    if not cycle_lines:
+        cycle_lines = _build_phase_call_block(ref, model)
 
-    call_block = _generate_call_block(all_calls)
+    if not cycle_lines:
+        cycle_lines = ["        self.client.get(\"/\")"]
 
-    # Determine first target service for host default
-    first_svc = "http://localhost"
-    if all_calls:
-        # Extract scheme + host from first URL
-        first_url = all_calls[0][0]
-        parts = first_url.split("/")
-        first_svc = f"{parts[0]}//{parts[2]}"
-
+    call_block = "\n".join(cycle_lines)
     needs_random = "random.random()" in call_block
+    needs_time = "time.sleep(" in call_block
+
+    imports = []
+    if needs_time:
+        imports.append("import time")
+    if needs_random:
+        imports.append("import random")
+    import_block = "\n".join(imports)
+    if import_block:
+        import_block += "\n"
 
     source = f'''"""Auto-generated locustfile from LQN model: {model.name}
 
-Reference task: {ref.name} (m={multiplicity}, z={think_time})
+Reference task: {ref.name} (m={multiplicity})
 Generated by: lqn-locustfile (GMT)
 """
-{"import random" if needs_random else ""}
-from locust import HttpUser, task
-
-THINK_TIME = {think_time}
+{import_block}from locust import HttpUser, task
 
 
 class LqnClient(HttpUser):
-    """Closed-loop client: {multiplicity} users, think time z={think_time}s (exponential)."""
-
-    host = "{first_svc}"
+    """Closed-loop client reproducing {ref.name} behavior."""
 
     def wait_time(self):
-        """Exponential think time matching LQN model semantics."""
-        {"return random.expovariate(1.0 / THINK_TIME) if THINK_TIME > 0 else 0" if needs_random else "import random; return random.expovariate(1.0 / THINK_TIME) if THINK_TIME > 0 else 0"}
+        """No Locust wait — all timing is modeled as time.sleep in cycle()."""
+        return 0
 
     @task
     def cycle(self):
-        """One activation of the reference task: execute all calls in sequence."""
+        """One activation of {ref.name}: activities and calls in graph order."""
 {call_block}
 '''
     return source.strip() + "\n"
