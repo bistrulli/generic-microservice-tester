@@ -653,7 +653,9 @@ def handle_root():
 
 def handle_lqn_request(entry_name: str | None, config: dict):
     """Handle request using LQN task configuration."""
-    my_name = os.environ.get("SERVICE_NAME", "generic-service")
+    my_name = os.environ.get(
+        "OTEL_SERVICE_NAME", os.environ.get("SERVICE_NAME", "generic-service")
+    )
     entries = config.get("entries", {})
     dry_run = _is_dry_run()
     trace_enabled = dry_run or os.environ.get("LQN_TRACE", "0") == "1"
@@ -676,7 +678,9 @@ def handle_lqn_request(entry_name: str | None, config: dict):
 
 def handle_legacy_request():
     """Legacy handler using SERVICE_TIME_SECONDS + OUTBOUND_CALLS env vars."""
-    my_name = os.environ.get("SERVICE_NAME", "generic-service")
+    my_name = os.environ.get(
+        "OTEL_SERVICE_NAME", os.environ.get("SERVICE_NAME", "generic-service")
+    )
 
     # 1. Simulate the service's own workload first
     do_work()
