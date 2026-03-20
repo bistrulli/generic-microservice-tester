@@ -246,7 +246,7 @@ def generate_deployment_yaml(
     return f"""apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {k8s_name}-deployment{ns_line}
+  name: {k8s_name}{ns_line}
   labels:
     app.kubernetes.io/name: {k8s_name}
     app.kubernetes.io/component: lqn-task
