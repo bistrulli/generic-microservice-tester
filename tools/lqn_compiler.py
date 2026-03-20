@@ -276,18 +276,6 @@ spec:
             cpu: "{cpu_limit}"
             memory: "512Mi"
         env:
-        - name: SERVICE_NAME
-          value: "{k8s_name}"
-        - name: OTEL_SERVICE_NAME
-          value: "{k8s_name}"
-        - name: OTEL_EXPORTER_OTLP_ENDPOINT
-          value: "http://otel-collector.observability:4318"
-        - name: OTEL_TRACES_EXPORTER
-          value: "otlp"
-        - name: OTEL_METRICS_EXPORTER
-          value: "none"
-        - name: OTEL_LOGS_EXPORTER
-          value: "none"
         - name: GUNICORN_WORKERS
           value: "{task.multiplicity}"
         - name: LQN_TASK_CONFIG
