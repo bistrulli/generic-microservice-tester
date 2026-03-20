@@ -95,6 +95,10 @@ cmd_up() {{
     kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 
     echo "[3/5] Applying OTEL Instrumentation CR..."
+    # The OTEL Operator auto-injects ALL OTEL env vars into annotated pods:
+    #   OTEL_SERVICE_NAME (from Deployment name), OTEL_EXPORTER_OTLP_ENDPOINT,
+    #   OTEL_TRACES/METRICS/LOGS_EXPORTER, OTEL_RESOURCE_ATTRIBUTES, PYTHONPATH.
+    # No OTEL env vars needed in Deployment manifests — just the annotation.
     cat <<'INSTREOF' | kubectl apply -n "$NAMESPACE" -f -
 apiVersion: opentelemetry.io/v1alpha1
 kind: Instrumentation
