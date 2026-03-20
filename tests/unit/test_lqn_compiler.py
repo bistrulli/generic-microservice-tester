@@ -191,34 +191,28 @@ class TestOtelAnnotation:
         assert 'inject-python: "true"' in yaml_str
 
 
-class TestOtelEnvVars:
-    def test_otel_service_name_present(self, model):
-        yaml_str = compile_model(model)
-        assert "OTEL_SERVICE_NAME" in yaml_str
+class TestNoOtelEnvVars:
+    """OTEL env vars must NOT be in manifests — the Operator injects them."""
 
-    def test_otel_service_name_matches_service_name(self, model):
-        """OTEL_SERVICE_NAME must equal SERVICE_NAME for Jaeger discovery."""
+    @pytest.mark.parametrize(
+        "banned",
+        [
+            "OTEL_SERVICE_NAME",
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            "OTEL_TRACES_EXPORTER",
+            "OTEL_METRICS_EXPORTER",
+            "OTEL_LOGS_EXPORTER",
+            "name: SERVICE_NAME",
+        ],
+    )
+    def test_no_otel_env_vars(self, model, banned):
         yaml_str = compile_model(model)
-        # Both should have the same value for each deployment
-        for line in yaml_str.splitlines():
-            if "OTEL_SERVICE_NAME" in line:
-                # The value line follows
-                break
-        # Check that tserver appears in both SERVICE_NAME and OTEL_SERVICE_NAME
-        assert yaml_str.count('value: "tserver"') >= 2
+        assert banned not in yaml_str
 
-    def test_otel_exporter_endpoint(self, model):
+    def test_app_env_vars_present(self, model):
         yaml_str = compile_model(model)
-        assert "http://otel-collector.observability:4318" in yaml_str
-
-    def test_otel_traces_exporter(self, model):
-        yaml_str = compile_model(model)
-        assert 'OTEL_TRACES_EXPORTER' in yaml_str
-        assert 'value: "otlp"' in yaml_str
-
-    def test_otel_metrics_exporter_none(self, model):
-        yaml_str = compile_model(model)
-        assert 'OTEL_METRICS_EXPORTER' in yaml_str
+        assert "GUNICORN_WORKERS" in yaml_str
+        assert "LQN_TASK_CONFIG" in yaml_str
 
 
 class TestNodePort:

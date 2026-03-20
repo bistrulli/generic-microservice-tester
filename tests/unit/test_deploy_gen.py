@@ -62,7 +62,7 @@ class TestScriptContent:
     def test_contains_k8s_manifests(self, script: str) -> None:
         assert "kind: Deployment" in script
         assert "kind: Service" in script
-        assert "tserver-deployment" in script
+        assert "name: tserver" in script
 
     def test_contains_up_down_test_commands(self, script: str) -> None:
         assert "cmd_up()" in script

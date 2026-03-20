@@ -19,13 +19,13 @@ from pathlib import Path
 
 try:
     from gmt.lqn_parser import parse_lqn_file
-    from gmt.tools.lqn_compiler import compile_model
+    from gmt.tools.lqn_compiler import compile_model, SUPPORTED_LANGUAGES
     from gmt.tools.locustfile_gen import generate_locustfile
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
     sys.path.insert(0, str(Path(__file__).parent))
     from lqn_parser import parse_lqn_file
-    from lqn_compiler import compile_model
+    from lqn_compiler import compile_model, SUPPORTED_LANGUAGES
     from locustfile_gen import generate_locustfile
 
 
@@ -39,6 +39,7 @@ def generate_deploy_script(
     image: str = "bistrulli/generic-microservice-tester:latest",
     namespace: str | None = None,
     node_port: int | None = None,
+    language: str = "python",
 ) -> tuple[str, str]:
     """Generate a deploy.sh script and locustfile for a given LQN model.
 
@@ -50,6 +51,7 @@ def generate_deploy_script(
         image: Docker image for GMT containers.
         namespace: K8s namespace (default: gmt-<model_name>).
         node_port: Fixed NodePort for entry-point service (None = auto-assign).
+        language: Application language for OTEL auto-instrumentation annotation.
 
     Returns:
         Tuple of (deploy_script, locustfile) as strings.
@@ -60,7 +62,9 @@ def generate_deploy_script(
         namespace = f"gmt-{_sanitize_name(model.name)}"
 
     # Generate K8s manifests (OTEL-compliant)
-    manifests = compile_model(model, image=image, namespace=namespace, node_port=node_port)
+    manifests = compile_model(
+        model, image=image, namespace=namespace, node_port=node_port, language=language,
+    )
 
     # Generate locustfile (stored as separate file alongside deploy.sh)
     locustfile = generate_locustfile(model)
@@ -95,11 +99,15 @@ cmd_up() {{
     kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 
     echo "[3/5] Applying OTEL Instrumentation CR..."
+    # The OTEL Operator auto-injects ALL OTEL env vars into annotated pods:
+    #   OTEL_SERVICE_NAME (from Deployment name), OTEL_EXPORTER_OTLP_ENDPOINT,
+    #   OTEL_TRACES/METRICS/LOGS_EXPORTER, OTEL_RESOURCE_ATTRIBUTES, PYTHONPATH.
+    # No OTEL env vars needed in Deployment manifests — just the annotation.
     cat <<'INSTREOF' | kubectl apply -n "$NAMESPACE" -f -
 apiVersion: opentelemetry.io/v1alpha1
 kind: Instrumentation
 metadata:
-  name: python-instrumentation
+  name: gmt-instrumentation
 spec:
   exporter:
     endpoint: http://otel-collector.observability:4318
@@ -107,7 +115,15 @@ spec:
   - tracecontext
   - baggage
   python:
-    image: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-python:latest
+    image: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-python:0.46b0
+  java:
+    image: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-java:2.10.0
+  nodejs:
+    image: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-nodejs:0.53.0
+  dotnet:
+    image: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-dotnet:1.9.0
+  go:
+    image: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-go:0.16.0
 INSTREOF
 
     echo "[4/5] Applying manifests..."
@@ -214,12 +230,18 @@ def main() -> None:
         help="Fixed NodePort for entry-point service (default: K8s auto-assign)",
     )
     parser.add_argument("-o", "--output", help="Output file (default: stdout)")
+    parser.add_argument(
+        "--language",
+        default="python",
+        choices=SUPPORTED_LANGUAGES,
+        help="Application language for OTEL auto-instrumentation annotation (default: python)",
+    )
 
     args = parser.parse_args()
 
     script, locustfile = generate_deploy_script(
         args.lqn_file, image=args.image, namespace=args.namespace,
-        node_port=args.nodeport,
+        node_port=args.nodeport, language=args.language,
     )
 
     if args.output:
