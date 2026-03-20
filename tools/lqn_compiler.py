@@ -224,13 +224,21 @@ def find_entry_point_task(model: LqnModel) -> str | None:
     return None
 
 
+SUPPORTED_LANGUAGES = ("python", "java", "nodejs", "dotnet", "go", "apache-httpd")
+
+
 def generate_deployment_yaml(
     task: LqnTask,
     model: LqnModel,
     image: str,
     namespace: str | None,
+    language: str = "python",
 ) -> str:
     """Generate K8s Deployment YAML for a task (OTEL-compliant)."""
+    if language not in SUPPORTED_LANGUAGES:
+        raise ValueError(
+            f"Unsupported language '{language}'. Must be one of: {SUPPORTED_LANGUAGES}"
+        )
     k8s_name = task_to_k8s_name(task.name)
     config = build_task_config(task, model)
     config_json = json.dumps(config, separators=(",", ":"))
@@ -261,7 +269,7 @@ spec:
       labels:
         app: {k8s_name}
       annotations:
-        instrumentation.opentelemetry.io/inject-python: "true"
+        instrumentation.opentelemetry.io/inject-{language}: "true"
     spec:
       containers:
       - name: app
@@ -315,6 +323,7 @@ def compile_model(
     image: str = "generic-microservice-tester:latest",
     namespace: str | None = None,
     node_port: int | None = None,
+    language: str = "python",
 ) -> str:
     """Compile an LQN model to K8s YAML manifests (OTEL-compliant)."""
     entry_point = find_entry_point_task(model)
@@ -327,7 +336,7 @@ def compile_model(
         k8s_name = task_to_k8s_name(task.name)
         is_entry = k8s_name == entry_point
 
-        deployment = generate_deployment_yaml(task, model, image, namespace)
+        deployment = generate_deployment_yaml(task, model, image, namespace, language)
         service = generate_service_yaml(
             task, namespace, is_entry_point=is_entry, node_port=node_port if is_entry else None
         )
@@ -356,12 +365,19 @@ def main():
         "--nodeport", type=int, default=None,
         help="Fixed NodePort for entry-point service (default: K8s auto-assign)",
     )
+    parser.add_argument(
+        "--language",
+        default="python",
+        choices=SUPPORTED_LANGUAGES,
+        help="Application language for OTEL auto-instrumentation annotation (default: python)",
+    )
 
     args = parser.parse_args()
 
     model = parse_lqn_file(args.lqn_file)
     yaml_output = compile_model(
-        model, image=args.image, namespace=args.namespace, node_port=args.nodeport
+        model, image=args.image, namespace=args.namespace, node_port=args.nodeport,
+        language=args.language,
     )
 
     if args.dry_run:
