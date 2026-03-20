@@ -617,6 +617,18 @@ def execute_phase_entry(
 @app.route("/<entry_name>")
 def handle_request(entry_name):
     """LQN entry endpoint or legacy handler."""
+    # Override OTEL span name from Flask route pattern (/<entry_name>)
+    # to the actual entry value (e.g., /POST_compose) for per-endpoint
+    # metrics in Prometheus spanmetrics.
+    try:
+        from opentelemetry import trace
+
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.update_name(f"GET /{entry_name}")
+    except ImportError:
+        pass  # OTEL not available (local dev without auto-instrumentation)
+
     config = load_task_config()
     if config:
         return handle_lqn_request(entry_name, config)
