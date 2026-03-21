@@ -16,7 +16,15 @@ from lqn_compiler import (
     resolve_call_target,
     task_to_k8s_name,
 )
-from lqn_parser import parse_lqn_file
+from lqn_parser import (
+    LqnActivity,
+    LqnActivityGraph,
+    LqnEntry,
+    LqnModel,
+    LqnProcessor,
+    LqnTask,
+    parse_lqn_file,
+)
 
 
 @pytest.fixture()
@@ -255,3 +263,172 @@ class TestFindEntryPoint:
             pytest.skip(f"Model not found: {lqn_path}")
         m = parse_lqn_file(str(lqn_path))
         assert find_entry_point_task(m) == "taskgw1"
+
+
+# --- Regression tests for 3+ activity chains ---
+
+
+@pytest.fixture()
+def chain_model():
+    """Synthetic LQN model with a 4-activity chain for regression testing.
+
+    Chain: start → call_a (→TStore/read) → call_b (→TStore/write) → call_c (→TLogger/log)
+    Reply on call_c (last activity), NOT on call_a or call_b.
+    """
+    return LqnModel(
+        name="chain-test",
+        processors=[
+            LqnProcessor(name="PClient"),
+            LqnProcessor(name="PMain", multiplicity=1),
+            LqnProcessor(name="PStore", multiplicity=1),
+            LqnProcessor(name="PLogger", multiplicity=1),
+        ],
+        tasks=[
+            LqnTask(
+                name="TClient",
+                is_reference=True,
+                processor="PClient",
+                entries=[LqnEntry(name="client_entry")],
+            ),
+            LqnTask(
+                name="TMain",
+                processor="PMain",
+                multiplicity=2,
+                entries=[LqnEntry(name="process", start_activity="start")],
+                activities={
+                    "start": LqnActivity(name="start", service_time=0.1),
+                    "call_a": LqnActivity(
+                        name="call_a",
+                        service_time=0.001,
+                        sync_calls=[("read", 1.0)],
+                    ),
+                    "call_b": LqnActivity(
+                        name="call_b",
+                        service_time=0.001,
+                        sync_calls=[("write", 1.0)],
+                    ),
+                    "call_c": LqnActivity(
+                        name="call_c",
+                        service_time=0.001,
+                        sync_calls=[("log", 1.0)],
+                    ),
+                },
+                activity_graph=LqnActivityGraph(
+                    sequences=[
+                        ("start", "call_a"),
+                        ("call_a", "call_b"),
+                        ("call_b", "call_c"),
+                    ],
+                    replies={"call_c": "process"},
+                ),
+            ),
+            LqnTask(
+                name="TStore",
+                processor="PStore",
+                entries=[
+                    LqnEntry(name="read", phase_service_times=[0.05]),
+                    LqnEntry(name="write", phase_service_times=[0.1]),
+                ],
+            ),
+            LqnTask(
+                name="TLogger",
+                processor="PLogger",
+                entries=[LqnEntry(name="log", phase_service_times=[0.02])],
+            ),
+        ],
+    )
+
+
+class TestLongActivityChain:
+    """Regression: chains of 3+ activities must not be truncated (model6 bug)."""
+
+    def test_all_activities_present(self, chain_model):
+        tmain = next(t for t in chain_model.tasks if t.name == "TMain")
+        config = build_task_config(tmain, chain_model)
+        activities = config["activities"]
+        assert "start" in activities
+        assert "call_a" in activities
+        assert "call_b" in activities
+        assert "call_c" in activities
+
+    def test_sequences_cover_full_chain(self, chain_model):
+        tmain = next(t for t in chain_model.tasks if t.name == "TMain")
+        config = build_task_config(tmain, chain_model)
+        seqs = config["graph"]["sequences"]
+        assert ("start", "call_a") in seqs
+        assert ("call_a", "call_b") in seqs
+        assert ("call_b", "call_c") in seqs
+
+    def test_reply_on_last_activity(self, chain_model):
+        tmain = next(t for t in chain_model.tasks if t.name == "TMain")
+        config = build_task_config(tmain, chain_model)
+        replies = config["graph"]["replies"]
+        assert replies["call_c"] == "process"
+        assert "call_a" not in replies
+        assert "call_b" not in replies
+
+    def test_start_activity_link(self, chain_model):
+        tmain = next(t for t in chain_model.tasks if t.name == "TMain")
+        config = build_task_config(tmain, chain_model)
+        assert config["entries"]["process"]["start_activity"] == "start"
+
+    def test_sync_calls_resolved(self, chain_model):
+        tmain = next(t for t in chain_model.tasks if t.name == "TMain")
+        config = build_task_config(tmain, chain_model)
+        assert "tstore-svc/read" in config["activities"]["call_a"]["sync_calls"]
+        assert "tstore-svc/write" in config["activities"]["call_b"]["sync_calls"]
+        assert "tlogger-svc/log" in config["activities"]["call_c"]["sync_calls"]
+
+
+MODEL6_PATH = Path.home() / "git/TLG/tests/lqn_structure_test/model6_social_network/model6_social_network_gt.lqn"
+
+
+@pytest.fixture()
+def model6():
+    if not MODEL6_PATH.exists():
+        pytest.skip(f"model6 not found: {MODEL6_PATH}")
+    return parse_lqn_file(str(MODEL6_PATH))
+
+
+class TestModel6SocialNetwork:
+    """Regression on the real social network model that exposed the chain bug."""
+
+    def test_nginx_gateway_has_gw_call_ht(self, model6):
+        gw = next(t for t in model6.tasks if t.name == "nginx_gateway")
+        config = build_task_config(gw, model6)
+        assert "gw_call_ht" in config["activities"]
+
+    def test_nginx_gateway_timeline_chain(self, model6):
+        gw = next(t for t in model6.tasks if t.name == "nginx_gateway")
+        config = build_task_config(gw, model6)
+        seqs = config["graph"]["sequences"]
+        assert ("gw_timeline", "gw_call_tl") in seqs
+        assert ("gw_call_tl", "gw_call_ht") in seqs
+
+    def test_nginx_gateway_reply_on_gw_call_ht(self, model6):
+        gw = next(t for t in model6.tasks if t.name == "nginx_gateway")
+        config = build_task_config(gw, model6)
+        replies = config["graph"]["replies"]
+        assert replies["gw_call_ht"] == "GET_timeline"
+        assert "gw_call_tl" not in replies
+
+    def test_compose_post_full_chain(self, model6):
+        """compose_post has a 6-activity chain — all must be preserved."""
+        cp = next(t for t in model6.tasks if t.name == "compose_post")
+        config = build_task_config(cp, model6)
+        seqs = config["graph"]["sequences"]
+        expected = [
+            ("cp_start", "cp_call_text"),
+            ("cp_call_text", "cp_call_media"),
+            ("cp_call_media", "cp_call_uid"),
+            ("cp_call_uid", "cp_call_post_store"),
+            ("cp_call_post_store", "cp_call_timeline_up"),
+        ]
+        for seq in expected:
+            assert seq in seqs
+        assert config["graph"]["replies"]["cp_call_timeline_up"] == "POST_create_post"
+
+    def test_all_12_non_reference_tasks_compiled(self, model6):
+        yaml_str = compile_model(model6)
+        deployments = [d for d in yaml_str.split("---") if "kind: Deployment" in d]
+        assert len(deployments) == 12
