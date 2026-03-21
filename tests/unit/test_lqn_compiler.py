@@ -378,3 +378,57 @@ class TestLongActivityChain:
         assert "tstore-svc/read" in config["activities"]["call_a"]["sync_calls"]
         assert "tstore-svc/write" in config["activities"]["call_b"]["sync_calls"]
         assert "tlogger-svc/log" in config["activities"]["call_c"]["sync_calls"]
+
+
+MODEL6_PATH = Path.home() / "git/TLG/tests/lqn_structure_test/model6_social_network/model6_social_network_gt.lqn"
+
+
+@pytest.fixture()
+def model6():
+    if not MODEL6_PATH.exists():
+        pytest.skip(f"model6 not found: {MODEL6_PATH}")
+    return parse_lqn_file(str(MODEL6_PATH))
+
+
+class TestModel6SocialNetwork:
+    """Regression on the real social network model that exposed the chain bug."""
+
+    def test_nginx_gateway_has_gw_call_ht(self, model6):
+        gw = next(t for t in model6.tasks if t.name == "nginx_gateway")
+        config = build_task_config(gw, model6)
+        assert "gw_call_ht" in config["activities"]
+
+    def test_nginx_gateway_timeline_chain(self, model6):
+        gw = next(t for t in model6.tasks if t.name == "nginx_gateway")
+        config = build_task_config(gw, model6)
+        seqs = config["graph"]["sequences"]
+        assert ("gw_timeline", "gw_call_tl") in seqs
+        assert ("gw_call_tl", "gw_call_ht") in seqs
+
+    def test_nginx_gateway_reply_on_gw_call_ht(self, model6):
+        gw = next(t for t in model6.tasks if t.name == "nginx_gateway")
+        config = build_task_config(gw, model6)
+        replies = config["graph"]["replies"]
+        assert replies["gw_call_ht"] == "GET_timeline"
+        assert "gw_call_tl" not in replies
+
+    def test_compose_post_full_chain(self, model6):
+        """compose_post has a 6-activity chain — all must be preserved."""
+        cp = next(t for t in model6.tasks if t.name == "compose_post")
+        config = build_task_config(cp, model6)
+        seqs = config["graph"]["sequences"]
+        expected = [
+            ("cp_start", "cp_call_text"),
+            ("cp_call_text", "cp_call_media"),
+            ("cp_call_media", "cp_call_uid"),
+            ("cp_call_uid", "cp_call_post_store"),
+            ("cp_call_post_store", "cp_call_timeline_up"),
+        ]
+        for seq in expected:
+            assert seq in seqs
+        assert config["graph"]["replies"]["cp_call_timeline_up"] == "POST_create_post"
+
+    def test_all_12_non_reference_tasks_compiled(self, model6):
+        yaml_str = compile_model(model6)
+        deployments = [d for d in yaml_str.split("---") if "kind: Deployment" in d]
+        assert len(deployments) == 12
