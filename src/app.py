@@ -618,8 +618,13 @@ def execute_phase_entry(
 def handle_request(entry_name):
     """LQN entry endpoint or legacy handler."""
     # Override OTEL span name from Flask route pattern (/<entry_name>)
-    # to the actual entry value (e.g., /POST_compose) for per-endpoint
+    # to the actual entry value (e.g., /Entr1, /POST_compose) for per-endpoint
     # metrics in Prometheus spanmetrics.
+    # NOTE: The OTEL Flask auto-instrumentation middleware may overwrite this
+    # name AFTER the handler returns (resetting to the route template). The
+    # PRIMARY fix is the Collector-side transform/catchall_rewrite processor
+    # (see TLG deploy/observability/otel-collector-config.yaml). This in-app
+    # fix is kept as defense-in-depth for environments without the transform.
     try:
         from opentelemetry import trace
 
