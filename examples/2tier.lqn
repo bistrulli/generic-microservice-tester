@@ -1,0 +1,103 @@
+# Model 3: Deep chain with varying service times
+# Topology: Task1(10ms) → Task2(50ms) → Task3(200ms) → Task4(500ms) → Task5(1000ms)
+# Stress-tests: self-time accuracy across 100x range, deep trace propagation
+G
+"lqn-model3-deep-chain.lqn"
+0.01
+10000
+1
+0.5
+-1
+
+# Processors
+P 0
+p Proc0 i
+p Proc1 f m 1
+p Proc2 f m 1
+p Proc3 f m 1
+p Proc4 f m 1
+p Proc5 f m 1
+-1
+
+# Tasks
+T 0
+t Task0 r Entr0 -1 Proc0 m 1
+t Task1 n Entr1 -1 Proc1 m 5
+t Task2 n Entr2 -1 Proc2 m 5
+t Task3 n Entr3 -1 Proc3 m 5
+t Task4 n Entr4 -1 Proc4 m 5
+t Task5 n Entr5 -1 Proc5 m 5
+-1
+
+# Entries
+E 0
+A Entr0 acti0
+A Entr1 acti1
+A Entr2 acti2
+A Entr3 acti3
+A Entr4 acti4
+A Entr5 acti5
+-1
+
+# Reference task
+A Task0
+s acti0 1.0
+s acti01 0.0001
+y acti01 Entr1 1
+:
+    acti0 -> acti01
+-1
+
+# Task1: 10ms → call Task2
+A Task1
+s acti1 0.01
+s acti12 0.0001
+y acti12 Entr2 1
+:
+    acti1 -> acti12;
+    acti12[Entr1]
+-1
+
+# Task2: 50ms → call Task3
+A Task2
+s acti2 0.05
+s acti23 0.0001
+y acti23 Entr3 1
+:
+    acti2 -> acti23;
+    acti23[Entr2]
+-1
+
+# Task3: 200ms → call Task4
+A Task3
+s acti3 0.2
+s acti34 0.0001
+y acti34 Entr4 1
+:
+    acti3 -> acti34;
+    acti34[Entr3]
+-1
+
+# Task4: 500ms → call Task5
+A Task4
+s acti4 0.5
+s acti45 0.0001
+y acti45 Entr5 1
+:
+    acti4 -> acti45;
+    acti45[Entr4]
+-1
+
+# Task5: 1000ms (leaf)
+A Task5
+s acti5 1.0
+:
+    acti5[Entr5]
+-1
+
+#! solver sim
+#! stoptime 1000.0
+#! throughput: Entr1 Entr2 Entr3 Entr4 Entr5
+#! utilization: Proc1 Proc2 Proc3 Proc4 Proc5
+#! responsetime: Entr1 Entr2 Entr3 Entr4 Entr5 -1
+#! export csv
